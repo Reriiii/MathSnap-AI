@@ -1,0 +1,84 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+
+class NAMERLoss(nn.Module):
+    """
+    L_all = L_VAT + λ * L_PGD
+    L_PGD = L_self + w_conn * (L_left + L_right)
+    """
+    def __init__(self, lam: float = 0.5, w_conn: float = 1.0, none_idx: int = 4):
+        super().__init__()
+        self.lam    = lam
+        self.w_conn = w_conn
+        self.none_idx = none_idx
+        self.ce     = nn.CrossEntropyLoss(ignore_index=-100)
+
+    def forward(self, out, vat_tgt, pgd_tgt, l_tgt, r_tgt, mask):
+        B, L   = pgd_tgt.shape
+        
+        # ── VAT Loss: torchvision.ops.sigmoid_focal_loss ──────────────────────
+        # vat_logits is [B, K+1, H/8, W/8], vat_tgt is [B, H/8, W/8]
+        # We need continuous one-hot targets for sigmoid_focal_loss
+        K = out['vat_logits'].size(1)
+        # Create one-hot targets: [B, H/8, W/8, K+1] -> [B, K+1, H/8, W/8]
+        targets_oh = F.one_hot(vat_tgt, num_classes=K).permute(0, 3, 1, 2).float()
+        
+        # alpha=0.9 (favoring the foreground classes)
+        loss_focal = torchvision.ops.sigmoid_focal_loss(
+            out['vat_logits'], targets_oh, alpha=0.9, gamma=2.0, reduction='sum'
+        )
+        
+        # Normalize by positive tokens (RetinaNet standard)
+        num_pos = (vat_tgt != self.none_idx).sum().float()
+        num_pos = torch.clamp(num_pos, min=1.0)
+        L_vat = loss_focal / num_pos
+
+        pgd_valid = (pgd_tgt.reshape(-1) != -100)
+        if pgd_valid.sum() > 0:
+            L_self = self.ce(
+                out['pgd_cls_logits'].reshape(B * L, -1), pgd_tgt.reshape(-1))
+        else:
+            L_self = torch.tensor(0.0, device=vat_tgt.device)
+
+        m      = mask.reshape(-1).bool()
+        l_tgt_c = l_tgt.clamp(0, L - 1)
+        r_tgt_c = r_tgt.clamp(0, L - 1)
+
+        if m.sum() > 0:
+            L_left  = self.ce(
+                out['left_logits'].reshape(B * L, -1)[m],
+                l_tgt_c.reshape(-1)[m])
+            L_right = self.ce(
+                out['right_logits'].reshape(B * L, -1)[m],
+                r_tgt_c.reshape(-1)[m])
+        else:
+            L_left  = torch.tensor(0.0, device=vat_tgt.device)
+            L_right = torch.tensor(0.0, device=vat_tgt.device)
+
+        L_pgd = L_self + self.w_conn * (L_left + L_right)
+        L_all = L_vat + self.lam * L_pgd
+        return L_all, {
+            'L_all':  L_all.item(),  'L_vat':   L_vat.item(),
+            'L_pgd':  L_pgd.item(),  'L_self':  L_self.item(),
+            'L_left': L_left.item(), 'L_right': L_right.item(),
+        }
+
+
+class DWAPLoss(nn.Module):
+    """Standard CE loss for DWAP AR training."""
+    def __init__(self, pad_idx: int = 0):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(ignore_index=pad_idx)
+
+    def forward(self, logits, token_ids):
+        """
+        logits:    [B, T, vocab_sz]   T = min(L-1, max_steps) (may be < L-1)
+        token_ids: [B, L]             targets = token_ids[:, 1:T+1]
+        """
+        B, T, V = logits.shape
+        # T may be capped (e.g. 60) — only supervise those T positions
+        targets = token_ids[:, 1:T+1]    # shift right, take first T targets
+        return self.ce(logits.reshape(B * T, V), targets.reshape(-1))
+
