@@ -45,7 +45,7 @@ class Config:
     max_len:    int   = 200
 
     # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 2
+    num_workers: int = 4   # 4 prefetch workers — keeps GPU fed between steps
     seed:        int = 42
 
 
@@ -81,5 +81,5 @@ class DWAPConfig:
     max_len: int   = 200
 
     # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 2
+    num_workers: int = 4   # 4 prefetch workers
     seed:        int = 42

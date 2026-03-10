@@ -49,33 +49,27 @@ def _path_selection(token_ids, E, none_idx, eps=0.5, sos=1, eos=2):
         return [t for t in token_ids if t not in (none_idx, sos, eos)]
 
     start, end = sos_nodes[0], eos_nodes[0]
-
-    # DFS topological sort
-    vis, topo = [False] * N, []
-    def _dfs(v):
-        vis[v] = True
-        for u, _ in adj[v]:
-            if not vis[u]:
-                _dfs(u)
-        topo.append(v)
-    for v in range(N):
-        if not vis[v]:
-            _dfs(v)
-    topo.reverse()
-
-    # DP: longest path
+    
+    # Bellman-Ford style Longest Path (max N edges)
+    # Since PGD edge predictions can (and will) contain cycles, 
+    # Topo Sort DP is INVALID. We must relax edges N times.
     dist = [-1e9] * N
-    prev = [-1]   * N
+    prev = [-1] * N
     dist[start] = 0.0
-    for v in topo:
-        if dist[v] == -1e9:
-            continue
-        for u, w in adj[v]:
-            if dist[v] + w > dist[u]:
-                dist[u] = dist[v] + w
-                prev[u] = v
 
-    # Traceback — cycle guard
+    for _ in range(N - 1):
+        updated = False
+        for u in range(N):
+            if dist[u] == -1e9: continue
+            for v, w in adj[u]:
+                if dist[u] + w > dist[v]:
+                    dist[v] = dist[u] + w
+                    prev[v] = u
+                    updated = True
+        if not updated:
+            break
+
+    # Traceback
     path, cur, seen = [], end, set()
     while cur != -1 and cur not in seen:
         seen.add(cur)

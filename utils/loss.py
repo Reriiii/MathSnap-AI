@@ -1,39 +1,35 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
+
 
 class NAMERLoss(nn.Module):
     """
     L_all = L_VAT + λ * L_PGD
     L_PGD = L_self + w_conn * (L_left + L_right)
+
+    L_VAT = CrossEntropy(vat_logits, vat_tgt)   — paper Eq. (3)
     """
     def __init__(self, lam: float = 0.5, w_conn: float = 1.0, none_idx: int = 4):
         super().__init__()
-        self.lam    = lam
-        self.w_conn = w_conn
+        self.lam      = lam
+        self.w_conn   = w_conn
         self.none_idx = none_idx
+        # VAT loss: standard multi-class CE over all spatial positions.
+        # Paper Eq.(3): L_VAT = CrossEntropy(P, P*)
+        # No ignore_index needed — none_idx (∅) is a valid class to predict.
+        self.vat_ce = nn.CrossEntropyLoss()
         self.ce     = nn.CrossEntropyLoss(ignore_index=-100)
 
     def forward(self, out, vat_tgt, pgd_tgt, l_tgt, r_tgt, mask):
-        B, L   = pgd_tgt.shape
-        
-        # ── VAT Loss: torchvision.ops.sigmoid_focal_loss ──────────────────────
-        # vat_logits is [B, K+1, H/8, W/8], vat_tgt is [B, H/8, W/8]
-        # We need continuous one-hot targets for sigmoid_focal_loss
-        K = out['vat_logits'].size(1)
-        # Create one-hot targets: [B, H/8, W/8, K+1] -> [B, K+1, H/8, W/8]
-        targets_oh = F.one_hot(vat_tgt, num_classes=K).permute(0, 3, 1, 2).float()
-        
-        # alpha=0.9 (favoring the foreground classes)
-        loss_focal = torchvision.ops.sigmoid_focal_loss(
-            out['vat_logits'], targets_oh, alpha=0.9, gamma=2.0, reduction='sum'
-        )
-        
-        # Normalize by positive tokens (RetinaNet standard)
-        num_pos = (vat_tgt != self.none_idx).sum().float()
-        num_pos = torch.clamp(num_pos, min=1.0)
-        L_vat = loss_focal / num_pos
+        B, L = pgd_tgt.shape
+
+        # ── VAT Loss: CrossEntropy (paper Eq. 3) ──────────────────────────────
+        # vat_logits: [B, vocab_size, H/8, W/8]   vat_tgt: [B, H/8, W/8]
+        # CE treats this as multi-class classification at every spatial position.
+        # The model is trained with softmax and inferred with argmax, which is
+        # fully consistent with CrossEntropyLoss.
+        L_vat = self.vat_ce(out['vat_logits'], vat_tgt)
 
         pgd_valid = (pgd_tgt.reshape(-1) != -100)
         if pgd_valid.sum() > 0:
@@ -81,4 +77,3 @@ class DWAPLoss(nn.Module):
         # T may be capped (e.g. 60) — only supervise those T positions
         targets = token_ids[:, 1:T+1]    # shift right, take first T targets
         return self.ce(logits.reshape(B * T, V), targets.reshape(-1))
-

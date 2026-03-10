@@ -59,8 +59,11 @@ class NAMER(nn.Module):
             prob_b = probs[b]                             # [K+1, H, W]
             max_probs, pred = prob_b.max(dim=0)           # [H, W]
             
-            # Require >0.5 probability (with sigmoid focal loss, anything above 0.5 is very strong)
-            tok_mask = (pred != none_idx) & (max_probs > 0.5)
+            # Require that the predicted class is not none_idx.
+            # VAT is trained with softmax CE: argmax is sufficient.
+            # A light threshold (0.15) removes very low-confidence positions
+            # where the model is barely better than uniform over 250 classes.
+            tok_mask = (pred != none_idx) & (max_probs > 0.15)
             pos  = tok_mask.nonzero(as_tuple=False)       # [n, 2] (row, col)
             if pos.size(0) == 0:
                 results.append([])
@@ -94,8 +97,12 @@ class NAMER(nn.Module):
                 self.pgd.compute_scores(qs, ql, qr, q0, pad_mask=pad_mask)
 
             corrected = cls_logits[0].argmax(dim=-1).cpu().tolist()
+            # Restore anchor tokens lost during SCH projection
+            # (since their training loss is ignored, SCH emits random tokens here)
+            corrected[0] = sos_idx
+            corrected[n+1] = eos_idx
+            
             E         = edge_scores[0].cpu().numpy()
             results.append(_path_selection(corrected, E, none_idx))
 
         return results
-

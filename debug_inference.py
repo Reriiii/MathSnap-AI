@@ -22,7 +22,7 @@ ldr = DataLoader(val_ds, 32, shuffle=False, collate_fn=col, num_workers=0)
 
 model = NAMER(vocab_size=len(vocab), d=cfg.d_model, heads=cfg.nhead,
               pgd_layers=cfg.pgd_layers, drop=0.0).to(device)
-ckpt = torch.load('checkpoints/best.pth', map_location=device, weights_only=False)
+ckpt = torch.load('checkpoints/ep020_0.05.pth', map_location=device, weights_only=False)
 model.load_state_dict(ckpt['model'], strict=False)
 model.eval()
 ep = ckpt.get('epoch', '?')
