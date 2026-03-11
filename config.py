@@ -41,7 +41,7 @@ class Config:
     # learn hardest (handling VAT noise with no GT support).
     pgd_teacher_epochs: int   = 15
     pgd_ss_end_epoch:   int   = 25
-    vat_lr_restart:     float = 5e-5   # phase-3 restart LR (< initial lr=1e-4)
+    vat_lr_restart:     float = 3e-5   # phase-3 restart LR (< initial lr=1e-4)
 
     # ── Model (paper defaults) ─────────────────────────────────────────────
     d_model:    int   = 256
@@ -53,7 +53,7 @@ class Config:
     max_len:    int   = 200
 
     # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 2
+    num_workers: int = 4
     seed:        int = 42
 
 
