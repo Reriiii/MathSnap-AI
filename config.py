@@ -32,8 +32,16 @@ class Config:
     eval_every:   int   = 5
     log_interval: int   = 50
     # Epochs using GT tokens for PGD (curriculum learning).
-    # After this, NAMER switches to VAT predictions as PGD input.
-    pgd_teacher_epochs: int = 8
+    # Phase 1 [1..pgd_teacher_epochs]:    p_gt = 1.0  (pure teacher forcing)
+    # Phase 2 [teacher..ss_end_epoch]:    p_gt declines linearly 1.0 → 0.0
+    # Phase 3 [ss_end_epoch..epochs]:     p_gt = 0.0  (pure VAT input)
+    #
+    # Old config had a hard switch at epoch 8 → loss spike.
+    # New schedule: hold GT until epoch 15, then fade over 10 epochs to epoch 25.
+    # VAT has ~0.025 loss by epoch 8 and is well-converged, so PGD gets
+    # increasingly realistic (but still partially guided) inputs during the fade.
+    pgd_teacher_epochs: int = 15
+    pgd_ss_end_epoch:   int = 25   # epoch where GT ratio reaches 0
 
     # ── Model (paper defaults) ─────────────────────────────────────────────
     d_model:    int   = 256
@@ -45,7 +53,7 @@ class Config:
     max_len:    int   = 200
 
     # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 4   # 4 prefetch workers — keeps GPU fed between steps
+    num_workers: int = 2
     seed:        int = 42
 
 
@@ -81,5 +89,5 @@ class DWAPConfig:
     max_len: int   = 200
 
     # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 4   # 4 prefetch workers
+    num_workers: int = 2
     seed:        int = 42
