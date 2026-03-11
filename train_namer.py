@@ -261,6 +261,12 @@ class Trainer:
             for k, v in ld.items():
                 run[k] += v
 
+            # Periodic cache clear prevents VRAM fragmentation in pure-VAT mode.
+            # Each batch creates variable-size tensors (max_l varies per batch),
+            # causing allocator fragments that accumulate: ep26=29min->ep28=42min.
+            if self.device.type == 'cuda' and (step + 1) % 500 == 0:
+                torch.cuda.empty_cache()
+
             if (step + 1) % self.log_interval == 0 or (step + 1) == len(loader):
                 n  = step + 1
                 lr = self.optimizer.param_groups[0]['lr']
@@ -285,22 +291,89 @@ class Trainer:
     # ------------------------------------------------------------------
     @torch.no_grad()
     def evaluate(self, loader, split: str = 'val'):
+        """
+        Evaluate ExpRate + VAT diagnostic.
+
+        VAT diagnostic (logged when split=='val'):
+          vat_prec  = TP / (TP + FP)   — of detected positions, how many are right token?
+          vat_rec   = TP / total_GT     — of all GT tokens, how many did VAT find?
+          vat_det   = avg detections per image
+
+        These tell us if VAT or PGD is the bottleneck:
+          - Low recall → VAT misses tokens → fix VAT training
+          - Low precision → VAT has many false positives → PGD must correct
+          - High prec+rec but low ExpRate → PGD or path_selection is the problem
+        """
         self.model.eval()
         preds, gts = [], []
+        # VAT diagnostic accumulators
+        vat_tp = vat_fp = vat_fn = vat_det_total = 0
+        n_samples = 0
+
+        none_idx = self.vocab.none_idx
         pbar = tqdm(loader, desc=f"             [{split:>5}]",
                     leave=False, dynamic_ncols=True, unit='batch')
         for batch in pbar:
-            pred_seqs = self.model(batch['image'].to(self.device), token_ids=None)
+            images       = batch['image'].to(self.device)
+            token_ids_gt = batch['token_ids'].to(self.device)
+
+            # Full forward for VAT diagnostic
+            f8x, f16x             = self.model.enc(images)
+            vat_probs, _          = self.model.vat(f8x, f16x)
+            pred_seqs             = self.model._infer(f16x, vat_probs)
+
+            # VAT diagnostic: compare VAT predictions to GT token positions
+            if split == 'val':
+                vat_pred_map = vat_probs.argmax(dim=1)   # [B, H, W]
+                B = images.size(0)
+                for b in range(B):
+                    pred_map = vat_pred_map[b]            # [H, W]
+                    gt_tids  = token_ids_gt[b]
+
+                    # GT foreground token set (unique positions expected by GT)
+                    gt_set = set(t.item() for t in gt_tids
+                                 if t.item() not in (self.vocab.pad_idx,
+                                                      self.vocab.sos_idx,
+                                                      self.vocab.eos_idx,
+                                                      none_idx))
+                    n_gt = len(gt_set)
+
+                    # Detected tokens (positions where pred != background)
+                    det_mask  = (pred_map != none_idx)
+                    det_tids  = pred_map[det_mask].cpu().tolist()
+                    det_set   = set(det_tids)
+                    n_det     = len(det_tids)
+
+                    tp = len(det_set & gt_set)
+                    fp = n_det - tp
+                    fn = n_gt  - tp
+
+                    vat_tp  += tp;  vat_fp += fp;  vat_fn += fn
+                    vat_det_total += n_det
+                    n_samples += 1
+
             for ids, gt_toks in zip(pred_seqs, batch['tokens']):
                 preds.append(self.vocab.decode(ids))
                 gts.append(gt_toks)
+
         pbar.close()
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
+
         er, l1, l2 = compute_exprate(preds, gts)
         tqdm.write(f"  ↳ [{split:>5}] ExpRate={er*100:.2f}%  ≤1={l1*100:.2f}%  ≤2={l2*100:.2f}%")
+
         if split == 'val':
+            prec = vat_tp / max(vat_tp + vat_fp, 1)
+            rec  = vat_tp / max(vat_tp + vat_fn, 1)
+            avg_det = vat_det_total / max(n_samples, 1)
+            tqdm.write(
+                f"         [VAT ] prec={prec*100:.1f}%  rec={rec*100:.1f}%"
+                f"  avg_det={avg_det:.1f}"
+            )
             self.history['val_exprate'].append(er)
+            self.history['vat_prec'].append(prec)
+            self.history['vat_rec'].append(rec)
         return er, l1, l2
 
     def save(self, epoch: int, er: float):
