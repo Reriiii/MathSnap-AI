@@ -36,12 +36,12 @@ class Config:
     # Phase 2 [teacher..ss_end_epoch]:    p_gt declines linearly 1.0 → 0.0
     # Phase 3 [ss_end_epoch..epochs]:     p_gt = 0.0  (pure VAT input)
     #
-    # Old config had a hard switch at epoch 8 → loss spike.
-    # New schedule: hold GT until epoch 15, then fade over 10 epochs to epoch 25.
-    # VAT has ~0.025 loss by epoch 8 and is well-converged, so PGD gets
-    # increasingly realistic (but still partially guided) inputs during the fade.
-    pgd_teacher_epochs: int = 15
-    pgd_ss_end_epoch:   int = 25   # epoch where GT ratio reaches 0
+    # LR schedule: cosine over phase 1+2, then RESTART at vat_lr_restart
+    # for phase 3. This prevents the LR from dying right when PGD needs to
+    # learn hardest (handling VAT noise with no GT support).
+    pgd_teacher_epochs: int   = 15
+    pgd_ss_end_epoch:   int   = 25
+    vat_lr_restart:     float = 5e-5   # phase-3 restart LR (< initial lr=1e-4)
 
     # ── Model (paper defaults) ─────────────────────────────────────────────
     d_model:    int   = 256
