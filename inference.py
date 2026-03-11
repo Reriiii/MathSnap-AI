@@ -30,7 +30,7 @@ from models import NAMER
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description='NAMER inference on a single image')
-parser.add_argument('--image',      type=str, default=r"D:\dataset\HME100K\images\1824.png",
+parser.add_argument('--image',      type=str, default=r"D:\dataset\HME100K\images\98868.png",
                     help='Path to image file.')
 parser.add_argument('--checkpoint', type=str, default=None,
                     help='Path to checkpoint .pth (default: checkpoints/best.pth or latest ep*.pth)')
@@ -74,7 +74,10 @@ model = NAMER(
 ).to(DEVICE)
 
 ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-model.load_state_dict(ckpt['model'])
+state_dict = ckpt['model']
+# Remove '_orig_mod.' prefix if model was saved with torch.compile()
+state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+model.load_state_dict(state_dict)
 model.eval()
 ep  = ckpt.get('epoch', '?')
 er  = ckpt.get('exprate', 0.0)
@@ -115,7 +118,8 @@ except Exception as e:
 tensor = tf(img).unsqueeze(0).to(DEVICE)
 
 with torch.no_grad():
-    pred_ids = model(tensor, token_ids=None)[0]
+    with torch.amp.autocast(device_type=DEVICE.type, dtype=torch.bfloat16 if DEVICE.type == 'cuda' else torch.float32):
+        pred_ids = model(tensor, token_ids=None)[0]
 
 pred_toks  = vocab.decode(pred_ids)
 pred_latex = ' '.join(pred_toks)
@@ -126,12 +130,13 @@ if gt_toks is not None:
 # ── VAT detection ─────────────────────────────────────────────────────────────
 print('\n── VAT Detection ──')
 with torch.no_grad():
-    f8x, f16x   = model.enc(tensor)
-    probs, _    = model.vat(f8x, f16x)
+    with torch.amp.autocast(device_type=DEVICE.type, dtype=torch.bfloat16 if DEVICE.type == 'cuda' else torch.float32):
+        f8x, f16x   = model.enc(tensor)
+        probs, _    = model.vat(f8x, f16x)
 
 none_idx = vocab.none_idx
-pred_map = probs[0].argmax(dim=0)
-detected = (pred_map != none_idx).nonzero(as_tuple=False)
+max_probs, pred_map = probs[0].max(dim=0)
+detected = ((pred_map != none_idx) & (max_probs > 0.15)).nonzero(as_tuple=False)
 
 if detected.size(0) == 0:
     print('  VAT: no tokens detected (model not trained enough)')
@@ -154,5 +159,5 @@ else:
 # ── Summary ───────────────────────────────────────────────────────────────────
 print('\n── Summary ──')
 if gt_toks:
-    print(f'  GT   ({len(gt_toks):3d} tokens): {" ".join(gt_toks[:20])}{"..." if len(gt_toks)>20 else ""}')
-print(f'  Pred ({len(pred_toks):3d} tokens): {" ".join(pred_toks[:20])}{"..." if len(pred_toks)>20 else ""}')
+    print(f'  GT   ({len(gt_toks):3d} tokens): {" ".join(gt_toks)}')
+print(f'  Pred ({len(pred_toks):3d} tokens): {" ".join(pred_toks)}')

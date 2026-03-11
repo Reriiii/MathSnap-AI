@@ -23,7 +23,7 @@ class Config:
     # ── Training ──────────────────────────────────────────────────────────
     epochs:       int   = 40
     batch_size:   int   = 32
-    lr:           float = 1e-4
+    lr:           float = 2e-4
     lambda_pgd:   float = 0.5
     # Connectivity loss weight — paper uses equal weight (1.0).
     # Was set to 0.01 due to right=500 bug, now fixed (ends count→index).

@@ -1,13 +1,15 @@
 """
 train_namer.py — Train NAMER on HME100K
 =========================================
-Optionally loads a pretrained DWAP checkpoint to provide accurate
-token position estimates T for VAT bipartite matching.
+Follows paper (arXiv:2407.11380) Sec 3.3 + 4.2:
+  - PGD always receives VAT predictions as input (no teacher forcing)
+  - LR: warmup 1 epoch -> lr_max, cosine decay -> lr_max * 1e-3
+  - Recommended lr=2e-4 (paper value; default config uses 1e-4)
 
 Usage:
     python train_namer.py
     python train_namer.py --dwap checkpoints/dwap_best.pth
-    python train_namer.py --resume checkpoints/ep025_11.04.pth
+    python train_namer.py --resume checkpoints/ep020_10.55.pth
 """
 import math, os, random, argparse
 from collections import defaultdict
@@ -26,7 +28,7 @@ from data.dataset import _collate
 from models import NAMER, DenseNetEncoder, DWAP
 from utils.loss import NAMERLoss
 from utils.metrics import compute_exprate
-from utils.matching import make_vat_targets, get_dwap_positions
+from utils.matching import make_vat_targets
 
 
 def _set_seed(s):
@@ -50,12 +52,9 @@ class Trainer:
         self.best_er      = 0.0
         self.history      = defaultdict(list)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        # Pre-computed DWAP positions: img_path -> Tensor[n, 2] (CPU)
-        # None = không có DWAP, make_vat_targets dùng uniform spread thay thế
         self.dwap_cache   = dwap_cache
 
-        # AMP dtype: bf16 trên Ampere+ (RTX 30xx/40xx/50xx), fp16 trên P100/V100/T4
+        # AMP: bf16 on Ampere+, fp16 on P100/V100/T4
         self.use_amp = (device.type == 'cuda')
         if self.use_amp:
             self.amp_dtype = (torch.bfloat16
@@ -71,44 +70,33 @@ class Trainer:
 
     # ------------------------------------------------------------------
     def train_epoch(self, loader, epoch: int, total_epochs: int,
-                    map_h: int, map_w: int,
-                    ss_start_epoch: int = 15,
-                    ss_end_epoch:   int = 25):
+                    map_h: int, map_w: int):
         """
-        Scheduled Sampling curriculum:
-          ep 1..ss_start       : p_gt = 1.0  (pure teacher forcing)
-          ep ss_start..ss_end  : p_gt 1.0->0.0 linear (per-batch coin flip)
-          ep ss_end..total     : p_gt = 0.0  (pure VAT, matches inference)
+        Paper Sec 3.3: PGD always receives VAT predictions as input.
+        Q0 = VAT visual features + 2D position encoding + word embedding.
+        No teacher forcing -- matches inference exactly from epoch 1.
         """
         self.model.train()
         run = defaultdict(float)
 
-        if epoch <= ss_start_epoch:
-            p_gt = 1.0
-        elif epoch >= ss_end_epoch:
-            p_gt = 0.0
-        else:
-            p_gt = 1.0 - (epoch - ss_start_epoch) / (ss_end_epoch - ss_start_epoch)
-
         pbar = tqdm(loader,
-                    desc=f"Ep {epoch:>3}/{total_epochs} [train] p_gt={p_gt:.2f}",
+                    desc=f"Ep {epoch:>3}/{total_epochs} [train]",
                     leave=True, dynamic_ncols=True, unit='batch')
 
         for step, batch in enumerate(pbar):
             images       = batch['image'].to(self.device)
             token_ids_gt = batch['token_ids'].to(self.device)
+            img_paths    = batch['img_path']
 
             with torch.amp.autocast(device_type=self.device.type,
                                     dtype=self.amp_dtype, enabled=self.use_amp):
                 f8x, f16x             = self.model.enc(images)
                 vat_probs, vat_logits = self.model.vat(f8x, f16x)
 
-            # Lấy DWAP positions từ cache (pre-computed), không chạy AR inference
+            # VAT bipartite matching -> targets + GT coordinates
             T_pos = None
             if self.dwap_cache is not None:
-                img_paths = batch['img_path']
                 T_pos = [self.dwap_cache.get(p) for p in img_paths]
-                # None entry = ảnh không có cache → make_vat_targets tự dùng uniform
 
             vat_tgt, gt_coords, raw_idx_tgt = make_vat_targets(
                 token_ids_gt, vat_probs.detach(), map_h, map_w,
@@ -123,113 +111,78 @@ class Trainer:
             dev      = self.device
             MAX_PGD  = 128
 
-            # Per-batch coin flip for smooth curriculum transition
-            use_gt_pgd = (p_gt == 1.0) or (p_gt > 0.0 and torch.rand(1).item() < p_gt)
+            # Build PGD input from VAT predictions (paper Sec 3.3)
+            vat_pred  = vat_probs.detach().argmax(dim=1)       # [B, H, W]
+            H, W      = vat_pred.shape[1], vat_pred.shape[2]
+            pred_flat = vat_pred.view(B, -1)                   # [B, H*W]
+            gt_flat   = vat_tgt.view(B, -1)                    # [B, H*W]
+            col_idx   = torch.arange(W, device=dev).unsqueeze(0).expand(H, W).reshape(-1)
+            is_tok    = (pred_flat != none_idx)
+            lengths   = is_tok.sum(dim=1).clamp(max=MAX_PGD - 2)
+            max_l     = int(lengths.max().item()) + 2
 
-            if use_gt_pgd:
-                raw   = token_ids_gt
-                max_l = min(raw.size(1), MAX_PGD)
+            pgd_input = torch.full((B, max_l), pad_idx, dtype=torch.long, device=dev)
+            pgd_tgt   = torch.full((B, max_l), -100,    dtype=torch.long, device=dev)
+            mask      = torch.zeros(B, max_l, device=dev)
+            coords    = torch.zeros(B, max_l, 2, device=dev)
+            coords[:, :, 0] = map_h // 2
+            coords[:, :, 1] = 0
+            pgd_input[:, 0] = sos_idx
+            l_tgt = torch.zeros(B, max_l, dtype=torch.long, device=dev)
+            r_tgt = torch.zeros(B, max_l, dtype=torch.long, device=dev)
 
-                vat_pred_full = vat_probs.detach().argmax(dim=1)
-                pgd_input = torch.full((B, max_l), pad_idx, dtype=torch.long, device=dev)
-                coords    = gt_coords[:, :max_l].contiguous().float()
+            # Build index tensors once, reuse for all samples in batch
+            y_idx      = torch.arange(H, device=dev).unsqueeze(1).expand(H, W).reshape(-1)
+            x_idx      = torch.arange(W, device=dev).unsqueeze(0).expand(H, W).reshape(-1)
+            max_gt_len = token_ids_gt.size(1)
 
-                for b in range(B):
-                    valid_mask = (raw[b, :max_l] != pad_idx)
-                    num_valid  = valid_mask.sum().item()
-                    rows = coords[b, :num_valid, 0].long().clamp(0, map_h - 1)
-                    cols = coords[b, :num_valid, 1].long().clamp(0, map_w - 1)
-                    pgd_input[b, :num_valid] = vat_pred_full[b, rows, cols]
-                    sp_mask = ((raw[b, :num_valid] == sos_idx) |
-                               (raw[b, :num_valid] == eos_idx))
-                    pgd_input[b, :num_valid][sp_mask] = raw[b, :num_valid][sp_mask]
+            for b in range(B):
+                n = lengths[b].item()
+                if n == 0:
+                    pgd_input[b, 1] = eos_idx
+                    mask[b, :2] = 1.0
+                    continue
 
-                pgd_tgt = raw[:, :max_l].contiguous().clone()
-                pgd_tgt[pgd_tgt == pad_idx] = -100
-                pgd_tgt[pgd_tgt == sos_idx] = -100
-                pgd_tgt[pgd_tgt == eos_idx] = -100
-                mask = (raw[:, :max_l] != pad_idx).float()
+                tok_mask   = is_tok[b]
+                order      = col_idx[tok_mask].argsort()[:n]
+                y_pos      = y_idx[tok_mask][order]
+                x_pos      = x_idx[tok_mask][order]
+                gt_indices = raw_idx_tgt[b].view(-1)[tok_mask][order]  # [n]
 
-                sp_mask_coord = ((raw[:, :max_l] == pad_idx) |
-                                 (raw[:, :max_l] == sos_idx) |
-                                 (raw[:, :max_l] == eos_idx))
-                coords[sp_mask_coord, 0] = map_h // 2
-                coords[sp_mask_coord, 1] = 0
+                pgd_input[b, 1:n+1] = pred_flat[b][tok_mask][order]
+                coords[b, 1:n+1]    = torch.stack([y_pos, x_pos], dim=-1).float()
+                pgd_input[b, n+1]   = eos_idx
+                pgd_tgt[b, 1:n+1]   = gt_flat[b][tok_mask][order]
+                mask[b, :n+2]       = 1.0
 
-                pos    = torch.arange(max_l, device=dev)
-                ends   = ((raw[:, :max_l] != pad_idx).sum(dim=1) - 1).clamp(0, max_l - 1)
-                l_tgt2 = (pos - 1).clamp(min=0).unsqueeze(0).expand(B, -1).clone()
-                r_tgt2 = (pos + 1).clamp(max=max_l - 1).unsqueeze(0).expand(B, -1).clone()
-                for b in range(B):
-                    r_tgt2[b] = r_tgt2[b].clamp(max=ends[b].item())
+                # Build GT->PGD index map via scatter (no Python inner loop)
+                pgd_positions  = torch.arange(1, n + 1, device=dev)
+                valid_ri       = (gt_indices >= 0) & (gt_indices < max_gt_len + 2)
+                raw_to_pgd_map = torch.zeros(max_gt_len + 2, dtype=torch.long, device=dev)
+                raw_to_pgd_map.scatter_(0, gt_indices[valid_ri].long(),
+                                        pgd_positions[valid_ri])
 
-            else:
-                vat_pred  = vat_probs.detach().argmax(dim=1)
-                H, W      = vat_pred.shape[1], vat_pred.shape[2]
-                pred_flat = vat_pred.view(B, -1)
-                gt_flat   = vat_tgt.view(B, -1)
-                col_idx   = torch.arange(W, device=dev).unsqueeze(0).expand(H, W).reshape(-1)
-                is_tok    = (pred_flat != none_idx)
-                lengths   = is_tok.sum(dim=1).clamp(max=MAX_PGD - 2)
-                max_l     = int(lengths.max().item()) + 2
+                last_gt_token = ((token_ids_gt[b] != pad_idx).sum() - 2).clamp(min=1)
+                if last_gt_token + 1 < max_gt_len + 2:
+                    raw_to_pgd_map[last_gt_token + 1] = n + 1
 
-                pgd_input = torch.full((B, max_l), pad_idx, dtype=torch.long, device=dev)
-                pgd_tgt   = torch.full((B, max_l), -100,    dtype=torch.long, device=dev)
-                mask      = torch.zeros(B, max_l, device=dev)
-                coords    = torch.zeros(B, max_l, 2, device=dev)
-                coords[:, :, 0] = map_h // 2
-                coords[:, :, 1] = 0
-                pgd_input[:, 0] = sos_idx
-                l_tgt2 = torch.zeros(B, max_l, dtype=torch.long, device=dev)
-                r_tgt2 = torch.zeros(B, max_l, dtype=torch.long, device=dev)
+                # SOS/EOS connectivity
+                l_tgt[b, 0]   = 0
+                r_tgt[b, 0]   = raw_to_pgd_map[1] if n > 0 else 0
+                l_tgt[b, n+1] = raw_to_pgd_map[last_gt_token] if n > 0 else 0
+                r_tgt[b, n+1] = n + 1
 
-                # Tạo một lần, dùng lại cho mọi sample trong batch
-                y_idx = torch.arange(H, device=dev).unsqueeze(1).expand(H, W).reshape(-1)
-                x_idx = torch.arange(W, device=dev).unsqueeze(0).expand(H, W).reshape(-1)
+                # Inner token connectivity (vectorized)
+                r_i_all     = gt_indices                                  # [n]
+                valid_conn  = (r_i_all >= 1) & (r_i_all <= last_gt_token)
+                r_i_clamped = r_i_all.clamp(1, max_gt_len)
+                l_vals = raw_to_pgd_map[r_i_clamped - 1]
+                r_vals = raw_to_pgd_map[(r_i_clamped + 1).clamp(max=max_gt_len + 1)]
+                # Invalid entries self-loop (pgd_idx -> itself)
+                l_tgt[b, 1:n+1] = torch.where(valid_conn, l_vals, pgd_positions)
+                r_tgt[b, 1:n+1] = torch.where(valid_conn, r_vals, pgd_positions)
 
-                for b in range(B):
-                    n = lengths[b].item()
-                    if n == 0:
-                        pgd_input[b, 1] = eos_idx; mask[b, :2] = 1.0; continue
-                    tok_mask = is_tok[b]
-                    order    = col_idx[tok_mask].argsort()[:n]
-
-                    y_pos = y_idx[tok_mask][order]
-                    x_pos = x_idx[tok_mask][order]
-                    gt_indices = raw_idx_tgt[b].view(-1)[tok_mask][order]
-
-                    pgd_input[b, 1:n+1] = pred_flat[b][tok_mask][order]
-                    coords[b, 1:n+1]    = torch.stack([y_pos, x_pos], dim=-1).float()
-                    pgd_input[b, n+1]   = eos_idx
-                    pgd_tgt[b, 1:n+1]   = gt_flat[b][tok_mask][order]
-                    mask[b, :n+2]       = 1.0
-
-                    max_gt_len     = token_ids_gt.size(1)
-                    raw_to_pgd_map = torch.zeros(max_gt_len + 2, dtype=torch.long, device=dev)
-                    raw_to_pgd_map[0] = 0
-                    for pgd_idx in range(1, n + 1):
-                        r_i = gt_indices[pgd_idx - 1]
-                        if r_i >= 0 and r_i < max_gt_len + 2:
-                            raw_to_pgd_map[r_i] = pgd_idx
-
-                    last_gt_token = ((token_ids_gt[b] != pad_idx).sum() - 2).clamp(min=1)
-                    if last_gt_token + 1 < max_gt_len + 2:
-                        raw_to_pgd_map[last_gt_token + 1] = n + 1
-
-                    l_tgt2[b, 0] = 0
-                    r_tgt2[b, 0] = raw_to_pgd_map[1] if n > 0 else 0
-                    l_tgt2[b, n+1] = raw_to_pgd_map[last_gt_token] if n > 0 else 0
-                    r_tgt2[b, n+1] = n + 1
-
-                    for pgd_idx in range(1, n + 1):
-                        r_i = gt_indices[pgd_idx - 1]
-                        if r_i >= 1 and r_i <= last_gt_token:
-                            l_tgt2[b, pgd_idx] = raw_to_pgd_map[r_i - 1]
-                            r_tgt2[b, pgd_idx] = raw_to_pgd_map[r_i + 1]
-                        else:
-                            l_tgt2[b, pgd_idx] = pgd_idx
-                            r_tgt2[b, pgd_idx] = pgd_idx
-
+            # PGD forward + loss
             with torch.amp.autocast(device_type=self.device.type,
                                     dtype=self.amp_dtype, enabled=self.use_amp):
                 pad_mask = (pgd_input == pad_idx)
@@ -242,11 +195,11 @@ class Trainer:
                     'left_logits':    left_logits,
                     'right_logits':   right_logits,
                 }
-                loss, ld = self.loss_fn(out, vat_tgt, pgd_tgt, l_tgt2, r_tgt2, mask)
+                loss, ld = self.loss_fn(out, vat_tgt, pgd_tgt, l_tgt, r_tgt, mask)
 
             if not torch.isfinite(loss):
                 tqdm.write(
-                    f"  [step {step+1}] skipped NaN —"
+                    f"  [step {step+1}] skipped NaN --"
                     f" vat={ld['L_vat']:.3f} self={ld['L_self']:.3f}"
                     f" left={ld['L_left']:.3f} right={ld['L_right']:.3f}"
                 )
@@ -265,10 +218,8 @@ class Trainer:
             for k, v in ld.items():
                 run[k] += v
 
-            # Periodic cache clear prevents VRAM fragmentation in pure-VAT mode.
-            # Each batch creates variable-size tensors (max_l varies per batch),
-            # causing allocator fragments that accumulate: ep26=29min->ep28=42min.
-            if self.device.type == 'cuda' and (step + 1) % 500 == 0:
+            # Periodic VRAM defrag (variable max_l causes fragmentation)
+            if self.device.type == 'cuda' and (step + 1) % 200 == 0:
                 torch.cuda.empty_cache()
 
             if (step + 1) % self.log_interval == 0 or (step + 1) == len(loader):
@@ -285,7 +236,7 @@ class Trainer:
         n_steps = len(loader)
         avg = {k: v / n_steps for k, v in run.items()}
         tqdm.write(
-            f"  ↳ Ep {epoch} train — "
+            f"  > Ep {epoch} train -- "
             f"L={avg['L_all']:.4f}  vat={avg['L_vat']:.4f}  pgd={avg['L_pgd']:.4f}"
             f"  (self={avg['L_self']:.3f} left={avg['L_left']:.3f} right={avg['L_right']:.3f})"
         )
@@ -297,20 +248,12 @@ class Trainer:
     def evaluate(self, loader, split: str = 'val'):
         """
         Evaluate ExpRate + VAT diagnostic.
-
-        VAT diagnostic (logged when split=='val'):
-          vat_prec  = TP / (TP + FP)   — of detected positions, how many are right token?
-          vat_rec   = TP / total_GT     — of all GT tokens, how many did VAT find?
-          vat_det   = avg detections per image
-
-        These tell us if VAT or PGD is the bottleneck:
-          - Low recall → VAT misses tokens → fix VAT training
-          - Low precision → VAT has many false positives → PGD must correct
-          - High prec+rec but low ExpRate → PGD or path_selection is the problem
+          prec = TP / (TP+FP)  -- correct among detections
+          rec  = TP / total_GT -- GT tokens found by VAT
+          avg_det = avg detections per image
         """
         self.model.eval()
         preds, gts = [], []
-        # VAT diagnostic accumulators
         vat_tp = vat_fp = vat_fn = vat_det_total = 0
         n_samples = 0
 
@@ -321,20 +264,17 @@ class Trainer:
             images       = batch['image'].to(self.device)
             token_ids_gt = batch['token_ids'].to(self.device)
 
-            # Full forward for VAT diagnostic
-            f8x, f16x             = self.model.enc(images)
-            vat_probs, _          = self.model.vat(f8x, f16x)
-            pred_seqs             = self.model._infer(f16x, vat_probs)
+            f8x, f16x        = self.model.enc(images)
+            vat_probs, _     = self.model.vat(f8x, f16x)
+            pred_seqs        = self.model._infer(f16x, vat_probs)
 
-            # VAT diagnostic: compare VAT predictions to GT token positions
             if split == 'val':
-                vat_pred_map = vat_probs.argmax(dim=1)   # [B, H, W]
+                vat_pred_map = vat_probs.argmax(dim=1)
                 B = images.size(0)
                 for b in range(B):
-                    pred_map = vat_pred_map[b]            # [H, W]
+                    pred_map = vat_pred_map[b]
                     gt_tids  = token_ids_gt[b]
 
-                    # GT foreground token set (unique positions expected by GT)
                     gt_set = set(t.item() for t in gt_tids
                                  if t.item() not in (self.vocab.pad_idx,
                                                       self.vocab.sos_idx,
@@ -342,17 +282,16 @@ class Trainer:
                                                       none_idx))
                     n_gt = len(gt_set)
 
-                    # Detected tokens (positions where pred != background)
-                    det_mask  = (pred_map != none_idx)
-                    det_tids  = pred_map[det_mask].cpu().tolist()
-                    det_set   = set(det_tids)
-                    n_det     = len(det_tids)
+                    det_mask = (pred_map != none_idx)
+                    det_tids = pred_map[det_mask].cpu().tolist()
+                    det_set  = set(det_tids)
+                    n_det    = len(det_tids)
 
                     tp = len(det_set & gt_set)
                     fp = n_det - tp
                     fn = n_gt  - tp
 
-                    vat_tp  += tp;  vat_fp += fp;  vat_fn += fn
+                    vat_tp += tp; vat_fp += fp; vat_fn += fn
                     vat_det_total += n_det
                     n_samples += 1
 
@@ -365,11 +304,11 @@ class Trainer:
             torch.cuda.empty_cache()
 
         er, l1, l2 = compute_exprate(preds, gts)
-        tqdm.write(f"  ↳ [{split:>5}] ExpRate={er*100:.2f}%  ≤1={l1*100:.2f}%  ≤2={l2*100:.2f}%")
+        tqdm.write(f"  > [{split:>5}] ExpRate={er*100:.2f}%  <=1={l1*100:.2f}%  <=2={l2*100:.2f}%")
 
         if split == 'val':
-            prec = vat_tp / max(vat_tp + vat_fp, 1)
-            rec  = vat_tp / max(vat_tp + vat_fn, 1)
+            prec    = vat_tp / max(vat_tp + vat_fp, 1)
+            rec     = vat_tp / max(vat_tp + vat_fn, 1)
             avg_det = vat_det_total / max(n_samples, 1)
             tqdm.write(
                 f"         [VAT ] prec={prec*100:.1f}%  rec={rec*100:.1f}%"
@@ -393,7 +332,7 @@ class Trainer:
         if er > self.best_er:
             self.best_er = er
             torch.save(ckpt, self.ckpt_dir / 'best.pth')
-            tqdm.write(f"  ✓ New best: {er*100:.2f}%  → best.pth")
+            tqdm.write(f"  + New best: {er*100:.2f}%  -> best.pth")
 
     def load(self, path: str):
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -408,18 +347,15 @@ class Trainer:
         return ckpt['epoch']
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def build_dwap_cache(dwap_ckpt_path: str, train_ds, cfg, device,
                      cache_path: str = None) -> dict:
     """
-    Chạy DWAP greedy decode một lần trên toàn bộ train set,
-    lưu attention argmax positions vào dict {img_path: Tensor[n,2]}.
-
-    - Chỉ chạy 1 lần duy nhất (~5-10 phút trên P100 cho 79K ảnh)
-    - Kết quả cache vào RAM (~3MB) và tùy chọn lưu disk để resume nhanh
-    - Sau khi xong, DWAP + encoder được xóa khỏi GPU (giải phóng ~1GB VRAM)
+    Run DWAP greedy decode once on entire train set.
+    Cache attention argmax positions: {img_path: Tensor[n, 2]}.
+    Saves to disk so resume skips rebuild.
+    DWAP + encoder freed from GPU after completion.
     """
-    # Thử load cache từ disk trước
     if cache_path and os.path.exists(cache_path):
         tqdm.write(f"DWAP cache: loading from {cache_path}")
         cache = torch.load(cache_path, map_location='cpu', weights_only=False)
@@ -440,25 +376,21 @@ def build_dwap_cache(dwap_ckpt_path: str, train_ds, cfg, device,
     ).to(device)
     dwap_model.load_state_dict(ckpt_dwap['dwap'])
     dwap_model.eval(); dwap_encoder.eval()
-    tqdm.write(f"  DWAP loaded (ExpRate={ckpt_dwap.get('exprate',0)*100:.2f}%)")
+    tqdm.write(f"  DWAP loaded (ExpRate={ckpt_dwap.get('exprate', 0)*100:.2f}%)")
 
     map_h = cfg.img_h // 8
     map_w = cfg.img_w // 8
 
-    vocab_pad = train_ds.vocab.pad_idx
-
-    def _collate_with_path(batch):
+    def _collate_path(batch):
         imgs = torch.stack([b['image'] for b in batch])
         return {'image': imgs, 'img_path': [b['img_path'] for b in batch]}
 
-    # num_workers=0 để tránh pickling issue với dwap trên subprocess
     loader = DataLoader(
         train_ds, batch_size=64, shuffle=False,
-        collate_fn=_collate_with_path,
-        num_workers=0, pin_memory=True,
+        collate_fn=_collate_path, num_workers=0, pin_memory=True,
     )
 
-    cache = {}
+    cache   = {}
     sos_idx = train_ds.vocab.sos_idx
     eos_idx = train_ds.vocab.eos_idx
 
@@ -470,17 +402,15 @@ def build_dwap_cache(dwap_ckpt_path: str, train_ds, cfg, device,
             _, attn_maps = dwap_model.decode(f8x, sos_idx=sos_idx,
                                               eos_idx=eos_idx, max_len=150)
             for b, path in enumerate(img_paths):
-                a = attn_maps[b]                   # Tensor [n_t, H, W] (CPU)
+                a = attn_maps[b]   # [n_t, H, W] CPU
                 if a.size(0) == 0:
                     cache[path] = torch.zeros(0, 2, dtype=torch.long)
                     continue
-                a_stack  = a                       # [n_t, H, W]
-                flat_idx = a_stack.view(a_stack.size(0), -1).argmax(dim=-1)
-                rows     = (flat_idx // map_w).unsqueeze(-1)
-                cols     = (flat_idx %  map_w).unsqueeze(-1)
-                cache[path] = torch.cat([rows, cols], dim=-1)  # [n_t, 2] CPU
+                flat_idx = a.view(a.size(0), -1).argmax(dim=-1)
+                rows = (flat_idx // map_w).unsqueeze(-1)
+                cols = (flat_idx %  map_w).unsqueeze(-1)
+                cache[path] = torch.cat([rows, cols], dim=-1)   # [n_t, 2]
 
-    # Xóa DWAP khỏi GPU ngay sau khi xong
     del dwap_model, dwap_encoder
     if device.type == 'cuda':
         torch.cuda.empty_cache()
@@ -489,12 +419,12 @@ def build_dwap_cache(dwap_ckpt_path: str, train_ds, cfg, device,
     if cache_path:
         Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(cache, cache_path)
-        tqdm.write(f"DWAP cache: saved → {cache_path}")
+        tqdm.write(f"DWAP cache: saved -> {cache_path}")
 
     return cache
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def run_training(cfg: Config):
     _set_seed(cfg.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -515,16 +445,14 @@ def run_training(cfg: Config):
     train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, drop_last=True, **dkw)
     val_loader   = DataLoader(val_ds,   cfg.batch_size, shuffle=False, **dkw)
     test_loader  = DataLoader(test_ds,  cfg.batch_size, shuffle=False, **dkw)
-    tqdm.write(f"Steps/epoch — train={len(train_loader):,} | val={len(val_loader):,} | test={len(test_loader):,}")
+    tqdm.write(f"Steps/epoch -- train={len(train_loader):,} | val={len(val_loader):,} | test={len(test_loader):,}")
 
     model = NAMER(
         vocab_size=len(vocab), d=cfg.d_model, heads=cfg.nhead,
         pgd_layers=cfg.pgd_layers, drop=cfg.drop,
     ).to(device)
-    tqdm.write(f"NAMER — vocab={len(vocab)} | params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    tqdm.write(f"NAMER -- vocab={len(vocab)} | params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
-    # torch.compile: ~15-20% speedup sau lần compile đầu (~2-3 phút)
-    # reduce-overhead tối ưu cho sequence length thay đổi theo batch
     if hasattr(torch, 'compile') and device.type == 'cuda':
         try:
             model = torch.compile(model, mode='reduce-overhead')
@@ -535,7 +463,6 @@ def run_training(cfg: Config):
     map_h = cfg.img_h // 8
     map_w = cfg.img_w // 8
 
-    # DWAP: pre-compute positions một lần, cache vào RAM + disk
     dwap_cache = None
     if cfg.dwap_checkpoint and os.path.exists(cfg.dwap_checkpoint):
         cache_path = str(Path(cfg.checkpoint_dir) / 'dwap_cache.pt')
@@ -544,31 +471,26 @@ def run_training(cfg: Config):
             cache_path=cache_path,
         )
     else:
-        tqdm.write("No DWAP checkpoint — using uniform spread for VAT position estimate")
+        tqdm.write("No DWAP checkpoint -- using uniform spread for VAT position estimate")
 
-    # Two-Phase LR: cosine phase1, then restart for pure-VAT phase
+    # LR schedule: paper Sec 4.2
+    #   warmup 1 epoch -> lr_max, cosine -> lr_max * 1e-3
+    #   Paper uses lr_max=2e-4; cfg.lr default is 1e-4
     optimizer    = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
-    phase1_steps = cfg.pgd_ss_end_epoch * len(train_loader)
-    phase2_steps = (cfg.epochs - cfg.pgd_ss_end_epoch) * len(train_loader)
-    warmup_steps = 2 * len(train_loader)
-    lr_min_mult  = 1e-3
-    vat_lr_mult  = cfg.vat_lr_restart / cfg.lr
+    total_steps  = cfg.epochs * len(train_loader)
+    warmup_steps = 1 * len(train_loader)
 
     def _lr_lambda(step):
-        if step <= phase1_steps:
-            if step < warmup_steps:
-                return step / max(1, warmup_steps)
-            prog = (step - warmup_steps) / max(1, phase1_steps - warmup_steps)
-            return max(lr_min_mult, 0.5 * (1.0 + math.cos(math.pi * prog)))
-        step2 = step - phase1_steps
-        prog2 = step2 / max(1, phase2_steps)
-        return vat_lr_mult * max(lr_min_mult, 0.5 * (1.0 + math.cos(math.pi * prog2)))
+        if step < warmup_steps:
+            return (step + 1) / max(1, warmup_steps)
+        prog = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(1e-3, 0.5 * (1.0 + math.cos(math.pi * prog)))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
-    loss_fn   = NAMERLoss(lam=cfg.lambda_pgd, w_conn=cfg.w_conn)
+    loss_fn   = NAMERLoss(lam=cfg.lambda_pgd, w_conn=cfg.w_conn,
+                          vocab_size=len(vocab)).to(device)
     tqdm.write(f"Loss: lambda_pgd={cfg.lambda_pgd}  w_conn={cfg.w_conn}")
-    tqdm.write(f"LR schedule: phase1 cosine {cfg.lr:.0e} over ep1-{cfg.pgd_ss_end_epoch}, "
-               f"restart {cfg.vat_lr_restart:.0e} over ep{cfg.pgd_ss_end_epoch}-{cfg.epochs}")
+    tqdm.write(f"LR schedule: warmup 1ep -> {cfg.lr:.0e}, cosine -> {cfg.lr*1e-3:.0e}")
 
     trainer = Trainer(model, optimizer, scheduler, loss_fn,
                       vocab, device, cfg.checkpoint_dir, cfg.log_interval,
@@ -584,13 +506,8 @@ def run_training(cfg: Config):
 
     for epoch in epoch_bar:
         epoch_bar.set_postfix({'best_val': f"{trainer.best_er*100:.2f}%"})
-        avg = trainer.train_epoch(
-            train_loader, epoch, cfg.epochs, map_h, map_w,
-            ss_start_epoch=cfg.pgd_teacher_epochs,
-            ss_end_epoch=cfg.pgd_ss_end_epoch,
-        )
-        in_pure_vat = (epoch > cfg.pgd_ss_end_epoch)
-        if in_pure_vat or epoch % cfg.eval_every == 0 or epoch == cfg.epochs:
+        avg = trainer.train_epoch(train_loader, epoch, cfg.epochs, map_h, map_w)
+        if epoch % cfg.eval_every == 0 or epoch == cfg.epochs:
             er, l1, l2 = trainer.evaluate(val_loader, split='val')
             trainer.save(epoch, er)
 
@@ -603,8 +520,8 @@ def run_training(cfg: Config):
         trainer.load(str(best_path))
     er, l1, l2 = trainer.evaluate(test_loader, split='test')
     tqdm.write(f"  ExpRate   : {er*100:.2f}%")
-    tqdm.write(f"  ExpRate≤1 : {l1*100:.2f}%")
-    tqdm.write(f"  ExpRate≤2 : {l2*100:.2f}%")
+    tqdm.write(f"  ExpRate<=1 : {l1*100:.2f}%")
+    tqdm.write(f"  ExpRate<=2 : {l2*100:.2f}%")
     tqdm.write(sep)
     return er, l1, l2
 

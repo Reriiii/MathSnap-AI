@@ -8,26 +8,31 @@ class NAMERLoss(nn.Module):
     L_all = L_VAT + lambda * L_PGD
     L_PGD = L_self + w_conn * (L_left + L_right)
 
-    L_VAT uses CrossEntropyLoss over K+1 classes (K vocab + 1 background).
-    Paper Eq.(3): L_VAT = CE(P_vat, P*)
+    L_VAT dùng weighted CrossEntropyLoss:
+      background (∅) chiếm ~98% spatial positions (map 16×64 = 1024, avg 20 tokens)
+      → down-weight none_idx về 0.05 để VAT không cheat bằng cách predict toàn background.
     """
-    def __init__(self, lam: float = 0.5, w_conn: float = 1.0, none_idx: int = 4):
+    def __init__(self, lam: float = 0.5, w_conn: float = 1.0,
+                 none_idx: int = 4, vocab_size: int = 191):
         super().__init__()
         self.lam      = lam
         self.w_conn   = w_conn
         self.none_idx = none_idx
-        # VAT: CE over spatial positions — vat_logits [B,K+1,H,W], vat_tgt [B,H,W]
-        self.vat_ce   = nn.CrossEntropyLoss()
-        # PGD self-correction: ignore SOS/EOS/PAD (marked as -100)
-        self.pgd_ce   = nn.CrossEntropyLoss(ignore_index=-100)
-        # Connectivity heads: CE over sequence positions
-        self.conn_ce  = nn.CrossEntropyLoss()
+
+        vat_weight           = torch.ones(vocab_size)
+        vat_weight[none_idx] = 0.05
+        self.register_buffer('vat_weight', vat_weight)
+
+        self.vat_ce  = nn.CrossEntropyLoss(weight=self.vat_weight)
+        self.pgd_ce  = nn.CrossEntropyLoss(ignore_index=-100)
+        self.conn_ce = nn.CrossEntropyLoss()
 
     def forward(self, out, vat_tgt, pgd_tgt, l_tgt, r_tgt, mask):
         B, L = pgd_tgt.shape
 
-        # ── VAT Loss: CrossEntropy ────────────────────────────────────────────
+        # ── VAT Loss ──────────────────────────────────────────────────────────
         # vat_logits: [B, K+1, H, W]   vat_tgt: [B, H, W]
+        # CrossEntropyLoss với weight → foreground classes có gradient mạnh hơn
         L_vat = self.vat_ce(out['vat_logits'], vat_tgt)
 
         # ── PGD Self-Correction Loss ──────────────────────────────────────────
