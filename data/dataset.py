@@ -156,6 +156,7 @@ def _collate(batch, pad_idx):
         'token_ids': tids,
         'latex':     [b['latex']  for b in batch],
         'tokens':    [b['tokens'] for b in batch],
+        'img_path':  [b['img_path'] for b in batch],
     }
 
 
