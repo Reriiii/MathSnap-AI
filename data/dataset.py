@@ -140,6 +140,7 @@ class HME100KDataset(Dataset):
             'token_ids': torch.tensor(tids, dtype=torch.long),
             'latex':     s['latex'],
             'tokens':    s['tokens'],
+            'img_path':  s['img_path']
         }
 
 

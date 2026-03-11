@@ -38,7 +38,7 @@ class Trainer:
     def __init__(self, model, optimizer, scheduler, loss_fn,
                  vocab: Vocabulary, device, checkpoint_dir: str,
                  log_interval: int = 50,
-                 dwap=None, dwap_encoder=None):
+                 dwap_cache: dict = None):
         self.model        = model
         self.optimizer    = optimizer
         self.scheduler    = scheduler
@@ -51,16 +51,23 @@ class Trainer:
         self.history      = defaultdict(list)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        self.dwap         = dwap
-        self.dwap_encoder = dwap_encoder
-        if dwap is not None:
-            self.dwap.eval()
-            self.dwap_encoder.eval()
+        # Pre-computed DWAP positions: img_path -> Tensor[n, 2] (CPU)
+        # None = không có DWAP, make_vat_targets dùng uniform spread thay thế
+        self.dwap_cache   = dwap_cache
 
-        # AMP: bf16 on RTX 5060 Ti ~2x faster than fp32
-        self.use_amp   = (device.type == 'cuda')
-        self.amp_dtype = torch.bfloat16 if self.use_amp else torch.float32
-        self.scaler    = torch.amp.GradScaler(device='cuda', enabled=self.use_amp)
+        # AMP dtype: bf16 trên Ampere+ (RTX 30xx/40xx/50xx), fp16 trên P100/V100/T4
+        self.use_amp = (device.type == 'cuda')
+        if self.use_amp:
+            self.amp_dtype = (torch.bfloat16
+                              if torch.cuda.is_bf16_supported()
+                              else torch.float16)
+        else:
+            self.amp_dtype = torch.float32
+        self.scaler = torch.amp.GradScaler(
+            device='cuda',
+            enabled=(self.use_amp and self.amp_dtype == torch.float16),
+        )
+        tqdm.write(f"AMP: {self.amp_dtype} | scaler: {self.scaler.is_enabled()}")
 
     # ------------------------------------------------------------------
     def train_epoch(self, loader, epoch: int, total_epochs: int,
@@ -96,17 +103,12 @@ class Trainer:
                 f8x, f16x             = self.model.enc(images)
                 vat_probs, vat_logits = self.model.vat(f8x, f16x)
 
-            # VAT targets via Hungarian matching
+            # Lấy DWAP positions từ cache (pre-computed), không chạy AR inference
             T_pos = None
-            if self.dwap is not None:
-                T_pos = get_dwap_positions(
-                    self.dwap, self.dwap_encoder, images,
-                    token_ids_gt,
-                    sos_idx=self.vocab.sos_idx,
-                    eos_idx=self.vocab.eos_idx,
-                    map_h=map_h, map_w=map_w,
-                    device=self.device,
-                )
+            if self.dwap_cache is not None:
+                img_paths = batch['img_path']
+                T_pos = [self.dwap_cache.get(p) for p in img_paths]
+                # None entry = ảnh không có cache → make_vat_targets tự dùng uniform
 
             vat_tgt, gt_coords, raw_idx_tgt = make_vat_targets(
                 token_ids_gt, vat_probs.detach(), map_h, map_w,
@@ -181,6 +183,10 @@ class Trainer:
                 l_tgt2 = torch.zeros(B, max_l, dtype=torch.long, device=dev)
                 r_tgt2 = torch.zeros(B, max_l, dtype=torch.long, device=dev)
 
+                # Tạo một lần, dùng lại cho mọi sample trong batch
+                y_idx = torch.arange(H, device=dev).unsqueeze(1).expand(H, W).reshape(-1)
+                x_idx = torch.arange(W, device=dev).unsqueeze(0).expand(H, W).reshape(-1)
+
                 for b in range(B):
                     n = lengths[b].item()
                     if n == 0:
@@ -188,8 +194,6 @@ class Trainer:
                     tok_mask = is_tok[b]
                     order    = col_idx[tok_mask].argsort()[:n]
 
-                    y_idx = torch.arange(H, device=dev).unsqueeze(1).expand(H, W).reshape(-1)
-                    x_idx = torch.arange(W, device=dev).unsqueeze(0).expand(H, W).reshape(-1)
                     y_pos = y_idx[tok_mask][order]
                     x_pos = x_idx[tok_mask][order]
                     gt_indices = raw_idx_tgt[b].view(-1)[tok_mask][order]
@@ -372,6 +376,8 @@ class Trainer:
                 f"  avg_det={avg_det:.1f}"
             )
             self.history['val_exprate'].append(er)
+            self.history['val_l1'].append(l1)
+            self.history['val_l2'].append(l2)
             self.history['vat_prec'].append(prec)
             self.history['vat_rec'].append(rec)
         return er, l1, l2
@@ -403,6 +409,92 @@ class Trainer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def build_dwap_cache(dwap_ckpt_path: str, train_ds, cfg, device,
+                     cache_path: str = None) -> dict:
+    """
+    Chạy DWAP greedy decode một lần trên toàn bộ train set,
+    lưu attention argmax positions vào dict {img_path: Tensor[n,2]}.
+
+    - Chỉ chạy 1 lần duy nhất (~5-10 phút trên P100 cho 79K ảnh)
+    - Kết quả cache vào RAM (~3MB) và tùy chọn lưu disk để resume nhanh
+    - Sau khi xong, DWAP + encoder được xóa khỏi GPU (giải phóng ~1GB VRAM)
+    """
+    # Thử load cache từ disk trước
+    if cache_path and os.path.exists(cache_path):
+        tqdm.write(f"DWAP cache: loading from {cache_path}")
+        cache = torch.load(cache_path, map_location='cpu', weights_only=False)
+        tqdm.write(f"DWAP cache: loaded {len(cache):,} entries")
+        return cache
+
+    tqdm.write(f"DWAP cache: building from {dwap_ckpt_path} ...")
+
+    ckpt_dwap    = torch.load(dwap_ckpt_path, map_location=device, weights_only=False)
+    dwap_encoder = DenseNetEncoder().to(device)
+    dwap_encoder.load_state_dict(ckpt_dwap['encoder'])
+    dwap_model   = DWAP(
+        ch_8x    = dwap_encoder.ch_8x,
+        d        = 256,
+        vocab_sz = ckpt_dwap.get('vocab_size', 186),
+        emb_dim  = 256,
+        drop     = 0.0,
+    ).to(device)
+    dwap_model.load_state_dict(ckpt_dwap['dwap'])
+    dwap_model.eval(); dwap_encoder.eval()
+    tqdm.write(f"  DWAP loaded (ExpRate={ckpt_dwap.get('exprate',0)*100:.2f}%)")
+
+    map_h = cfg.img_h // 8
+    map_w = cfg.img_w // 8
+
+    vocab_pad = train_ds.vocab.pad_idx
+
+    def _collate_with_path(batch):
+        imgs = torch.stack([b['image'] for b in batch])
+        return {'image': imgs, 'img_path': [b['img_path'] for b in batch]}
+
+    # num_workers=0 để tránh pickling issue với dwap trên subprocess
+    loader = DataLoader(
+        train_ds, batch_size=64, shuffle=False,
+        collate_fn=_collate_with_path,
+        num_workers=0, pin_memory=True,
+    )
+
+    cache = {}
+    sos_idx = train_ds.vocab.sos_idx
+    eos_idx = train_ds.vocab.eos_idx
+
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="  Building DWAP cache", unit='batch', leave=False):
+            imgs      = batch['image'].to(device)
+            img_paths = batch['img_path']
+            f8x, _    = dwap_encoder(imgs)
+            _, attn_maps = dwap_model.decode(f8x, sos_idx=sos_idx,
+                                              eos_idx=eos_idx, max_len=150)
+            for b, path in enumerate(img_paths):
+                a = attn_maps[b]                   # Tensor [n_t, H, W] (CPU)
+                if a.size(0) == 0:
+                    cache[path] = torch.zeros(0, 2, dtype=torch.long)
+                    continue
+                a_stack  = a                       # [n_t, H, W]
+                flat_idx = a_stack.view(a_stack.size(0), -1).argmax(dim=-1)
+                rows     = (flat_idx // map_w).unsqueeze(-1)
+                cols     = (flat_idx %  map_w).unsqueeze(-1)
+                cache[path] = torch.cat([rows, cols], dim=-1)  # [n_t, 2] CPU
+
+    # Xóa DWAP khỏi GPU ngay sau khi xong
+    del dwap_model, dwap_encoder
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+    tqdm.write(f"DWAP cache: {len(cache):,} entries built, DWAP removed from GPU")
+
+    if cache_path:
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(cache, cache_path)
+        tqdm.write(f"DWAP cache: saved → {cache_path}")
+
+    return cache
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def run_training(cfg: Config):
     _set_seed(cfg.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -418,6 +510,7 @@ def run_training(cfg: Config):
         pin_memory=(device.type == 'cuda'),
         num_workers=cfg.num_workers,
         persistent_workers=(cfg.num_workers > 0),
+        prefetch_factor=(2 if cfg.num_workers > 0 else None),
     )
     train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, drop_last=True, **dkw)
     val_loader   = DataLoader(val_ds,   cfg.batch_size, shuffle=False, **dkw)
@@ -430,26 +523,26 @@ def run_training(cfg: Config):
     ).to(device)
     tqdm.write(f"NAMER — vocab={len(vocab)} | params={sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
+    # torch.compile: ~15-20% speedup sau lần compile đầu (~2-3 phút)
+    # reduce-overhead tối ưu cho sequence length thay đổi theo batch
+    if hasattr(torch, 'compile') and device.type == 'cuda':
+        try:
+            model = torch.compile(model, mode='reduce-overhead')
+            tqdm.write("torch.compile: enabled (reduce-overhead)")
+        except Exception as e:
+            tqdm.write(f"torch.compile: skipped ({e})")
+
     map_h = cfg.img_h // 8
     map_w = cfg.img_w // 8
 
-    dwap_model   = None
-    dwap_encoder = None
+    # DWAP: pre-compute positions một lần, cache vào RAM + disk
+    dwap_cache = None
     if cfg.dwap_checkpoint and os.path.exists(cfg.dwap_checkpoint):
-        tqdm.write(f"Loading DWAP from {cfg.dwap_checkpoint}")
-        ckpt_dwap    = torch.load(cfg.dwap_checkpoint, map_location=device, weights_only=False)
-        dwap_encoder = DenseNetEncoder().to(device)
-        dwap_encoder.load_state_dict(ckpt_dwap['encoder'])
-        dwap_model   = DWAP(
-            ch_8x   = dwap_encoder.ch_8x,
-            d       = 256,
-            vocab_sz= len(vocab),
-            emb_dim = 256,
-            drop    = 0.0,
-        ).to(device)
-        dwap_model.load_state_dict(ckpt_dwap['dwap'])
-        dwap_model.eval(); dwap_encoder.eval()
-        tqdm.write(f"DWAP loaded — val ExpRate was {ckpt_dwap.get('exprate',0)*100:.2f}%")
+        cache_path = str(Path(cfg.checkpoint_dir) / 'dwap_cache.pt')
+        dwap_cache = build_dwap_cache(
+            cfg.dwap_checkpoint, train_ds, cfg, device,
+            cache_path=cache_path,
+        )
     else:
         tqdm.write("No DWAP checkpoint — using uniform spread for VAT position estimate")
 
@@ -479,7 +572,7 @@ def run_training(cfg: Config):
 
     trainer = Trainer(model, optimizer, scheduler, loss_fn,
                       vocab, device, cfg.checkpoint_dir, cfg.log_interval,
-                      dwap=dwap_model, dwap_encoder=dwap_encoder)
+                      dwap_cache=dwap_cache)
 
     start_epoch = 0
     if cfg.resume_checkpoint:

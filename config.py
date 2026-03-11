@@ -53,7 +53,7 @@ class Config:
     max_len:    int   = 200
 
     # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 4
+    num_workers: int = 2
     seed:        int = 42
 
 
