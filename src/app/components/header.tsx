@@ -11,14 +11,9 @@ import {
   Home, 
   LayoutDashboard, 
   Wand2, 
-  FolderOpen, 
-  History, 
-  FileText, 
-  HelpCircle,
-  User,
   Settings,
   LogOut
-} from "lucide-react";
+} from "lucide-react"; // Đã xóa các icon không dùng để nhẹ code
 import { cn } from "@/app/components/ui/utils";
 
 interface HeaderProps {
@@ -28,14 +23,11 @@ interface HeaderProps {
 }
 
 export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
+  // Chỉ giữ lại 3 mục bà muốn
   const navItems = [
     { id: "home", label: "Home", icon: Home },
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "convert", label: "Convert", icon: Wand2 },
-    { id: "projects", label: "Projects", icon: FolderOpen },
-    { id: "history", label: "History", icon: History },
-    { id: "templates", label: "Templates", icon: FileText },
-    { id: "help", label: "Help", icon: HelpCircle },
   ];
 
   return (
@@ -69,25 +61,6 @@ export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
           ))}
         </nav>
 
-        {/* Tablet Navigation - Scrollable */}
-        <nav className="hidden md:flex lg:hidden items-center gap-1 overflow-x-auto max-w-md">
-          {navItems.slice(0, 5).map((item) => (
-            <Button
-              key={item.id}
-              variant={currentPage === item.id ? "default" : "ghost"}
-              size="sm"
-              onClick={() => onNavigate(item.id)}
-              className={cn(
-                "gap-2 whitespace-nowrap",
-                currentPage === item.id && "bg-primary text-primary-foreground"
-              )}
-            >
-              <item.icon className="h-4 w-4" />
-              {item.label}
-            </Button>
-          ))}
-        </nav>
-
         {/* Right Side Actions */}
         <div className="flex items-center gap-2">
           <Button 
@@ -98,15 +71,8 @@ export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
             <Wand2 className="h-4 w-4 mr-2" />
             New Convert
           </Button>
-          <Button 
-            onClick={onNewConvert}
-            size="icon"
-            className="bg-primary text-primary-foreground hover:bg-primary/90 sm:hidden"
-          >
-            <Wand2 className="h-4 w-4" />
-          </Button>
 
-          {/* User Menu */}
+          {/* User Menu - Đã dọn dẹp các mục Projects/History dư thừa */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="rounded-full">
@@ -116,23 +82,11 @@ export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem onClick={() => onNavigate("projects")}>
-                <FolderOpen className="h-4 w-4 mr-2" />
-                My Projects
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onNavigate("history")}>
-                <History className="h-4 w-4 mr-2" />
-                My History
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <FileText className="h-4 w-4 mr-2" />
-                Saved Snippets
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => onNavigate("settings")}>
                 <Settings className="h-4 w-4 mr-2" />
                 Settings
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem>
                 <LogOut className="h-4 w-4 mr-2" />
                 Logout
@@ -142,10 +96,10 @@ export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
         </div>
       </div>
 
-      {/* Mobile Bottom Navigation */}
+      {/* Mobile Bottom Navigation - Tự động hiển thị theo navItems */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-card border-t border-border z-50">
         <nav className="flex items-center justify-around px-2 py-2">
-          {navItems.slice(0, 5).map((item) => (
+          {navItems.map((item) => (
             <Button
               key={item.id}
               variant="ghost"

@@ -3,11 +3,7 @@ import { Header } from "@/app/components/header";
 import { HomePage } from "@/app/components/home-page";
 import { DashboardPage } from "@/app/components/dashboard-page";
 import { ConvertPage } from "@/app/components/convert-page";
-import { ProjectsPage } from "@/app/components/projects-page";
-import { HistoryPage } from "@/app/components/history-page";
-import { TemplatesPage } from "@/app/components/templates-page";
 import { SettingsPage } from "@/app/components/settings-page";
-import { HelpPage } from "@/app/components/help-page";
 import { Toaster } from "@/app/components/ui/sonner";
 
 export default function App() {

@@ -1,8 +1,10 @@
-import { useState } from "react";
 import { Button } from "@/app/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/app/components/ui/card";
 import { Badge } from "@/app/components/ui/badge";
+import OpenAI from "openai";
+import { useState, useEffect, useRef } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Textarea } from "@/app/components/ui/textarea";
 import { ScrollArea } from "@/app/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/app/components/ui/sheet";
@@ -53,7 +55,7 @@ export function ConvertPage() {
     <div className="h-[calc(100vh-4rem)] md:h-[calc(100vh-4rem)] pb-16 md:pb-0 flex flex-col lg:flex-row overflow-hidden">
       {/* Left Panel - Image Upload & Viewer (Desktop) */}
       <div className="hidden lg:block w-80 xl:w-96 border-r border-border bg-card">
-        <ImagePanel 
+        <ImagePanel
           mockImages={mockImages}
           selectedImage={selectedImage}
           onImageSelect={setSelectedImage}
@@ -63,16 +65,16 @@ export function ConvertPage() {
       {/* Left Panel - Mobile Drawer */}
       <Sheet open={leftPanelOpen} onOpenChange={setLeftPanelOpen}>
         <SheetTrigger asChild>
-          <Button 
-            variant="outline" 
-            size="icon" 
+          <Button
+            variant="outline"
+            size="icon"
             className="lg:hidden fixed top-20 left-4 z-40 shadow-lg"
           >
             <Menu className="h-4 w-4" />
           </Button>
         </SheetTrigger>
         <SheetContent side="left" className="w-80 p-0">
-          <ImagePanel 
+          <ImagePanel
             mockImages={mockImages}
             selectedImage={selectedImage}
             onImageSelect={(id) => {
@@ -176,6 +178,15 @@ interface ImagePanelProps {
 }
 
 function ImagePanel({ mockImages, selectedImage, onImageSelect, isMobile }: ImagePanelProps) {
+  // Hàm xử lý khi chọn file từ máy tính
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const imageUrl = URL.createObjectURL(file);
+      onImageSelect(imageUrl); // Lưu link ảnh vào state selectedImage của cha
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       {isMobile && (
@@ -185,31 +196,46 @@ function ImagePanel({ mockImages, selectedImage, onImageSelect, isMobile }: Imag
       )}
       <ScrollArea className="flex-1">
         <div className="p-4 space-y-4">
-          {/* Upload Box */}
-          <div className="border-2 border-dashed border-border rounded-lg p-6 text-center space-y-3 hover:border-primary/50 transition-colors cursor-pointer">
+
+          {/* Upload Box - Đã kích hoạt Click để chọn file */}
+          <div
+            onClick={() => document.getElementById('fileInput')?.click()}
+            className="border-2 border-dashed border-border rounded-lg p-6 text-center space-y-3 hover:border-primary/50 transition-colors cursor-pointer"
+          >
             <div className="flex justify-center">
-              <Upload className="h-8 w-8 text-muted-foreground" />
+              {/* Nếu đã chọn ảnh thì hiện ảnh nhỏ (thumbnail) ở đây, không thì hiện icon Upload */}
+              {selectedImage && selectedImage.startsWith('blob:') ? (
+                <img src={selectedImage} alt="Preview" className="h-16 w-16 object-cover rounded border" />
+              ) : (
+                <Upload className="h-8 w-8 text-muted-foreground" />
+              )}
             </div>
             <div>
-              <p className="text-sm font-medium">Drag & drop image here</p>
-              <p className="text-xs text-muted-foreground mt-1">or click to browse</p>
+              <p className="text-sm font-medium">Click to browse image</p>
+              <p className="text-xs text-muted-foreground mt-1">PNG, JPG up to 10MB</p>
             </div>
-            <Input type="file" className="hidden" accept="image/*" />
+            {/* Input này ẩn đi, chỉ dùng để nhận file */}
+            <Input
+              id="fileInput"
+              type="file"
+              className="hidden"
+              accept="image/*"
+              onChange={handleFileChange}
+            />
           </div>
 
           {/* Image List */}
           <div className="space-y-2">
-            <h4 className="text-sm font-medium">Uploaded Images</h4>
+            <h4 className="text-sm font-medium">Samples / Uploaded</h4>
             <div className="space-y-2">
               {mockImages.map((img) => (
                 <div
                   key={img.id}
                   onClick={() => onImageSelect(img.id.toString())}
-                  className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                    selectedImage === img.id.toString()
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:border-primary/50"
-                  }`}
+                  className={`p-3 rounded-lg border cursor-pointer transition-colors ${selectedImage === img.id.toString()
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
+                    }`}
                 >
                   <div className="flex items-center gap-3">
                     <div className="w-12 h-12 bg-muted rounded flex items-center justify-center flex-shrink-0">
@@ -217,7 +243,7 @@ function ImagePanel({ mockImages, selectedImage, onImageSelect, isMobile }: Imag
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium truncate">{img.name}</p>
-                      <p className="text-xs text-muted-foreground">2.4 MB</p>
+                      <p className="text-xs text-muted-foreground">Sample</p>
                     </div>
                   </div>
                 </div>
@@ -225,35 +251,29 @@ function ImagePanel({ mockImages, selectedImage, onImageSelect, isMobile }: Imag
             </div>
           </div>
 
-          {/* Image Viewer Tools */}
+          {/* Image Viewer Tools - Sẽ hiện khi có ảnh được chọn */}
           {selectedImage && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm">Image Tools</CardTitle>
+            <Card className="overflow-hidden border-primary/20">
+              <CardHeader className="pb-3 bg-muted/50">
+                <CardTitle className="text-sm flex justify-between items-center">
+                  Image Preview
+                  <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => onImageSelect(null)}>Remove</Button>
+                </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  <Button variant="outline" size="sm">
-                    <ZoomIn className="h-4 w-4 mr-2" />
-                    Zoom In
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <ZoomOut className="h-4 w-4 mr-2" />
-                    Zoom Out
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <RotateCw className="h-4 w-4 mr-2" />
-                    Rotate
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <Crop className="h-4 w-4 mr-2" />
-                    Crop
-                  </Button>
+              <CardContent className="p-0 border-t border-border">
+                {/* Hiển thị ảnh lớn ở đây để bà soi công thức */}
+                <div className="bg-black/5 flex items-center justify-center p-2 min-h-[150px]">
+                  <img
+                    src={selectedImage.startsWith('blob:') ? selectedImage : `https://via.placeholder.com/300?text=${selectedImage}`}
+                    alt="Current selection"
+                    className="max-w-full h-auto rounded shadow-sm"
+                  />
                 </div>
-                <Button variant="outline" size="sm" className="w-full">
-                  <SunDim className="h-4 w-4 mr-2" />
-                  Adjust Brightness
-                </Button>
+                <div className="p-3 grid grid-cols-2 gap-2">
+                  <Button variant="outline" size="sm" className="h-8 text-xs"><ZoomIn className="h-3 w-3 mr-1" /> Zoom In</Button>
+                  <Button variant="outline" size="sm" className="h-8 text-xs"><ZoomOut className="h-3 w-3 mr-1" /> Zoom Out</Button>
+                  <Button variant="outline" size="sm" className="h-8 text-xs" className="col-span-2"><RotateCw className="h-3 w-3 mr-1" /> Rotate</Button>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -270,78 +290,136 @@ interface ChatPanelProps {
 }
 
 function ChatPanel({ suggestedPrompts, isMobile }: ChatPanelProps) {
-  const mockMessages = [
+  const [messages, setMessages] = useState([
     {
       role: "assistant",
-      content: "Hi! I'm your Math Assistant. I can help explain formulas, fix LaTeX errors, or answer questions about mathematical notation."
-    },
-    {
-      role: "user",
-      content: "What does this integral represent?"
-    },
-    {
-      role: "assistant",
-      content: "This is a Gaussian integral. It represents the area under the bell curve from 0 to infinity. The result √π/2 is a fundamental constant in probability theory."
+      content: "Hi Dan! I'm your Math Assistant. I can help explain formulas, fix LaTeX errors, or answer questions about mathematical notation."
     }
-  ];
+  ]);
+  const [inputValue, setInputValue] = useState("");
+
+  // 1. Tạo Ref để làm mỏ neo cuộn trang
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // 2. Tự động cuộn xuống mỗi khi có tin nhắn mới
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!inputValue.trim()) return;
+
+    const currentInput = inputValue;
+    setMessages(prev => [...prev, { role: "user", content: currentInput }]);
+    setInputValue("");
+
+    try {
+      // Dùng Key sạch ông vừa tạo nhé
+      const API_KEY = "AIzaSyCwdM4RB-wUA-xxtCYEwideetEegHdNuIk";
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: `Bạn là 'MathSnap AI Assistant' - một chuyên gia về Toán học và LaTeX. 
+                    Nhiệm vụ của bạn là giúp sinh viên FPTU giải đáp thắc mắc. 
+                    Nếu câu hỏi liên quan đến công thức, hãy giải thích chi tiết ý nghĩa các ký hiệu. 
+                    Sử dụng ngôn ngữ thân thiện, chuyên nghiệp.
+                    Câu hỏi hiện tại: ${currentInput}`
+                  }
+                ]
+              }
+            ]
+          })
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error?.message || "Lỗi kết nối AI");
+      }
+
+      const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || "AI không trả lời.";
+
+      setMessages(prev => [...prev, { role: "assistant", content: aiText }]);
+
+    } catch (error: any) {
+      console.error(error);
+      setMessages(prev => [
+        ...prev,
+        { role: "assistant", content: "Có lỗi khi gọi AI: " + error.message }
+      ]);
+    }
+  };
 
   return (
-    <div className="h-full flex flex-col">
-      {isMobile && (
-        <SheetHeader className="p-4 border-b border-border">
-          <SheetTitle>Math Assistant</SheetTitle>
-        </SheetHeader>
-      )}
-      {!isMobile && (
-        <div className="p-4 border-b border-border">
-          <h3 className="font-medium">Math Assistant</h3>
-          <p className="text-xs text-muted-foreground mt-1">
-            Ask questions about your formulas
-          </p>
-        </div>
-      )}
+    // Thêm overflow-hidden để cố định khung chat không bị đùn toàn trang
+    <div className="h-full flex flex-col bg-card overflow-hidden">
 
-      {/* Messages */}
-      <ScrollArea className="flex-1 p-4">
-        <div className="space-y-4">
-          {mockMessages.map((msg, idx) => (
-            <div
-              key={idx}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div
-                className={`max-w-[85%] rounded-lg p-3 ${
-                  msg.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted"
-                }`}
-              >
-                <p className="text-sm">{msg.content}</p>
+      {/* Header - Cố định ở trên nhờ shrink-0 */}
+      <div className="p-4 border-b border-border shrink-0">
+        <h3 className="font-medium">Math Assistant</h3>
+        <p className="text-xs text-muted-foreground mt-1">Ask questions about your formulas</p>
+      </div>
+
+      {/* Messages - flex-1 để chiếm trọn không gian giữa và có scroll riêng */}
+      <ScrollArea className="flex-1 w-full overflow-y-auto">
+        <div className="p-4 space-y-4">
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div className={`max-w-[85%] rounded-lg p-3 ${msg.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted"}`}>
+                <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
               </div>
             </div>
           ))}
+          {/* Mỏ neo để useEffect nhìn vào và cuộn xuống */}
+          <div ref={scrollRef} />
         </div>
       </ScrollArea>
 
-      {/* Suggested Prompts */}
-      <div className="p-4 border-t border-border space-y-3">
-        <p className="text-xs text-muted-foreground">Suggested prompts:</p>
-        <div className="flex flex-wrap gap-2">
-          {suggestedPrompts.map((prompt, idx) => (
-            <Button key={idx} variant="outline" size="sm" className="text-xs h-auto py-1.5">
-              {prompt}
-            </Button>
-          ))}
+      {/* Phần chân trang - Luôn dính ở đáy nhờ shrink-0 */}
+      <div className="shrink-0 border-t border-border bg-card">
+        {/* Suggested Prompts */}
+        <div className="p-4 pb-2 space-y-3">
+          <p className="text-xs text-muted-foreground">Suggested prompts:</p>
+          <div className="flex flex-wrap gap-2">
+            {suggestedPrompts.map((prompt, idx) => (
+              <Button
+                key={idx}
+                variant="outline"
+                size="sm"
+                className="text-xs h-auto py-1.5"
+                onClick={() => { setInputValue(prompt); }}
+              >
+                {prompt}
+              </Button>
+            ))}
+          </div>
         </div>
-      </div>
 
-      {/* Input */}
-      <div className="p-4 border-t border-border">
-        <div className="flex gap-2">
-          <Input placeholder="Ask a question..." className="flex-1" />
-          <Button size="icon" className="bg-accent text-accent-foreground flex-shrink-0">
-            <Send className="h-4 w-4" />
-          </Button>
+        {/* Input Field */}
+        <div className="p-4 pt-2">
+          <div className="flex gap-2">
+            <Input
+              placeholder="Ask a question..."
+              className="flex-1"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+            />
+            <Button onClick={handleSend} size="icon" className="bg-accent text-accent-foreground shrink-0">
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </div>
