@@ -23,24 +23,27 @@ def compute_exprate(preds, gts):
     return ex / N, l1 / N, l2 / N
 
 
-def _path_selection(token_ids, E, none_idx, eps=0.5, sos=1, eos=2):
+def _path_selection(token_ids, E, none_idx, sos=1, eos=2):
     """
-    DAG longest-path selection.
+    Graph path selection using argmax right-neighbor pointers.
 
-    token_ids: list of corrected token ids from SCH
-    E:         [N, N] numpy edge score matrix
-    none_idx:  index of ∅ (background) class
-    eps:       edge threshold for adjacency
+    token_ids : list[int]  corrected token ids from SCH (length N)
+    E         : np.ndarray [N, N]  edge_scores = right_scores + left_scores.T
+                right_scores[i,j] = P(right neighbor of i is j)  (softmax, sums to 1)
+                E[i,j] is highest when both i thinks j is its right and j thinks i is its left.
+
+    WHY NOT eps threshold:
+      right_scores is a softmax over N tokens.  For N=20, uniform ≈ 0.05.
+      eps=0.5 would filter virtually every edge → Bellman-Ford sees empty graph
+      → always falls back to column-sorted list → PGD completely bypassed.
+
+    CORRECT approach: use argmax right-pointer to build a deterministic chain.
+      right_ptr[i] = argmax_j E[i,j]   (best right neighbor of i)
+      Then trace: SOS → right_ptr[SOS] → ... → EOS
     """
     N = len(token_ids)
     if N == 0:
         return []
-
-    adj = defaultdict(list)
-    for i in range(N):
-        for j in range(N):
-            if i != j and float(E[i, j]) >= eps:
-                adj[i].append((j, float(E[i, j])))
 
     sos_nodes = [i for i, t in enumerate(token_ids) if t == sos]
     eos_nodes = [i for i, t in enumerate(token_ids) if t == eos]
@@ -48,36 +51,26 @@ def _path_selection(token_ids, E, none_idx, eps=0.5, sos=1, eos=2):
     if not sos_nodes or not eos_nodes:
         return [t for t in token_ids if t not in (none_idx, sos, eos)]
 
-    start, end = sos_nodes[0], eos_nodes[0]
-    
-    # Bellman-Ford style Longest Path (max N edges)
-    # Since PGD edge predictions can (and will) contain cycles, 
-    # Topo Sort DP is INVALID. We must relax edges N times.
-    dist = [-1e9] * N
-    prev = [-1] * N
-    dist[start] = 0.0
+    start = sos_nodes[0]
+    end   = eos_nodes[0]
 
-    for _ in range(N - 1):
-        updated = False
-        for u in range(N):
-            if dist[u] == -1e9: continue
-            for v, w in adj[u]:
-                if dist[u] + w > dist[v]:
-                    dist[v] = dist[u] + w
-                    prev[v] = u
-                    updated = True
-        if not updated:
-            break
+    # Build right-pointer chain from argmax of edge matrix
+    right_ptr = E.argmax(axis=1)   # [N]  for each node, best right neighbor
 
-    # Traceback
-    path, cur, seen = [], end, set()
-    while cur != -1 and cur not in seen:
+    path = []
+    cur  = start
+    seen = set()
+    while cur != end and cur not in seen and len(path) < N + 2:
         seen.add(cur)
         path.append(cur)
-        cur = prev[cur]
-    path.reverse()
+        cur = int(right_ptr[cur])
 
-    if not path or path[0] != start:
-        return [t for t in token_ids if t not in (none_idx, sos, eos)]
+    if cur == end:
+        path.append(end)
 
-    return [token_ids[i] for i in path if token_ids[i] not in (sos, eos, none_idx)]
+    # Valid path must start at SOS and end at EOS
+    if len(path) >= 2 and path[0] == start and path[-1] == end:
+        return [token_ids[i] for i in path if token_ids[i] not in (sos, eos, none_idx)]
+
+    # Fallback: column-sorted order (same as before, but now only triggers on cycle)
+    return [t for t in token_ids if t not in (none_idx, sos, eos)]

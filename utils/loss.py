@@ -8,9 +8,11 @@ class NAMERLoss(nn.Module):
     L_all = L_VAT + lambda * L_PGD
     L_PGD = L_self + w_conn * (L_left + L_right)
 
-    L_VAT dùng weighted CrossEntropyLoss:
-      background (∅) chiếm ~98% spatial positions (map 16×64 = 1024, avg 20 tokens)
-      → down-weight none_idx về 0.05 để VAT không cheat bằng cách predict toàn background.
+    VAT class weight:
+      Background (none_idx) chiếm ~98% spatial positions.
+      none_weight=0.05 → avg_det=35 (FP flood, prec=26%)
+      none_weight=1.00 → avg_det=15 (rec=73%, misses tokens)
+      none_weight=0.20 → target: prec~60%, rec~85%, avg_det~18
     """
     def __init__(self, lam: float = 0.5, w_conn: float = 1.0,
                  none_idx: int = 4, vocab_size: int = 191):
@@ -20,7 +22,7 @@ class NAMERLoss(nn.Module):
         self.none_idx = none_idx
 
         vat_weight           = torch.ones(vocab_size)
-        vat_weight[none_idx] = 0.05
+        vat_weight[none_idx] = 0.20   # tuned: balance prec/rec
         self.register_buffer('vat_weight', vat_weight)
 
         self.vat_ce  = nn.CrossEntropyLoss(weight=self.vat_weight)
@@ -30,12 +32,10 @@ class NAMERLoss(nn.Module):
     def forward(self, out, vat_tgt, pgd_tgt, l_tgt, r_tgt, mask):
         B, L = pgd_tgt.shape
 
-        # ── VAT Loss ──────────────────────────────────────────────────────────
-        # vat_logits: [B, K+1, H, W]   vat_tgt: [B, H, W]
-        # CrossEntropyLoss với weight → foreground classes có gradient mạnh hơn
+        # VAT loss
         L_vat = self.vat_ce(out['vat_logits'], vat_tgt)
 
-        # ── PGD Self-Correction Loss ──────────────────────────────────────────
+        # PGD self-correction loss
         pgd_valid = (pgd_tgt.reshape(-1) != -100)
         if pgd_valid.sum() > 0:
             L_self = self.pgd_ce(
@@ -44,7 +44,7 @@ class NAMERLoss(nn.Module):
         else:
             L_self = torch.tensor(0.0, device=vat_tgt.device)
 
-        # ── Connectivity Losses ───────────────────────────────────────────────
+        # Connectivity losses
         m       = mask.reshape(-1).bool()
         l_tgt_c = l_tgt.clamp(0, L - 1)
         r_tgt_c = r_tgt.clamp(0, L - 1)
@@ -70,7 +70,6 @@ class NAMERLoss(nn.Module):
 
 
 class DWAPLoss(nn.Module):
-    """Standard CE loss for DWAP AR training."""
     def __init__(self, pad_idx: int = 0):
         super().__init__()
         self.ce = nn.CrossEntropyLoss(ignore_index=pad_idx)
