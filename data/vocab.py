@@ -26,6 +26,10 @@ class Vocabulary:
     def eos_idx(self):           return self.t2i['<eos>']
     @property
     def none_idx(self):          return self.t2i['∅']
+    @property
+    def open_idx(self):          return self.t2i.get('{', -1)
+    @property
+    def close_idx(self):         return self.t2i.get('}', -1)
 
     def encode(self, tokens):
         unk = self.t2i['<unk>']

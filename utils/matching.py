@@ -17,6 +17,7 @@ _MATCH_POOL = ThreadPoolExecutor(max_workers=4)
 
 def _build_cost_matrix(b, token_ids, P_vat, map_h, map_w,
                         none_idx, pad_idx, sos_idx, eos_idx,
+                        open_idx, close_idx,
                         vocab_sz, km, T_positions):
     """
     Build the cost matrix for one sample — runs in a thread.
@@ -27,7 +28,15 @@ def _build_cost_matrix(b, token_ids, P_vat, map_h, map_w,
     device = P_vat.device
 
     tids_b   = token_ids[b]
-    keep     = (tids_b != pad_idx) & (tids_b != sos_idx) & (tids_b != eos_idx)
+    # Exclude: padding, SOS, EOS, open-brace {, close-brace }
+    # { and } are structural/imaginary tokens — they have no spatial position
+    keep = (
+        (tids_b != pad_idx)  &
+        (tids_b != sos_idx)  &
+        (tids_b != eos_idx)  &
+        (tids_b != open_idx) &
+        (tids_b != close_idx)
+    )
     valid    = tids_b[keep].clamp(0, vocab_sz - 1)
     orig_idx = keep.nonzero(as_tuple=False).squeeze(-1)
     n        = valid.size(0)
@@ -83,6 +92,7 @@ def _run_hungarian(args):
 def bipartite_match_vat_targets(
     token_ids, P_vat, map_h, map_w,
     none_idx, pad_idx, sos_idx, eos_idx,
+    open_idx, close_idx,
     vocab_sz, km=5, device='cpu',
     T_positions=None,
 ):
@@ -107,6 +117,7 @@ def bipartite_match_vat_targets(
             result = _build_cost_matrix(
                 b, token_ids, P_vat, map_h, map_w,
                 none_idx, pad_idx, sos_idx, eos_idx,
+                open_idx, close_idx,
                 vocab_sz, km, T_positions)
             if result is not None:
                 prepared.append(result)
@@ -135,10 +146,15 @@ def bipartite_match_vat_targets(
 
 def make_vat_targets(token_ids, P_vat, map_h, map_w,
                      vocab, device, T_positions=None, km=5):
-    """Wrapper: build VAT targets and clamp to valid range."""
+    """Wrapper: build VAT targets and clamp to valid range.
+
+    Excludes { (open_idx) and } (close_idx) from bipartite matching —
+    these are structural/imaginary tokens with no spatial position.
+    """
     vat_tgt, coords_tgt, raw_idx_tgt = bipartite_match_vat_targets(
         token_ids, P_vat, map_h, map_w,
         vocab.none_idx, vocab.pad_idx, vocab.sos_idx, vocab.eos_idx,
+        vocab.open_idx, vocab.close_idx,
         len(vocab), km=km, device=device, T_positions=T_positions,
     )
     return vat_tgt.clamp(0, len(vocab) - 1), coords_tgt, raw_idx_tgt
