@@ -1,45 +1,18 @@
 from collections import defaultdict
+import numpy as np
 
 
-def _edit_dist(a, b):
-    m, n = len(a), len(b)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        ndp = [i] + [0] * n
-        for j in range(1, n + 1):
-            ndp[j] = dp[j-1] if a[i-1] == b[j-1] else 1 + min(dp[j], ndp[j-1], dp[j-1])
-        dp = ndp
-    return dp[n]
-
-
-def compute_exprate(preds, gts):
-    ex = l1 = l2 = 0
-    for p, g in zip(preds, gts):
-        d = _edit_dist(p, g)
-        if d == 0: ex += 1
-        if d <= 1: l1 += 1
-        if d <= 2: l2 += 1
-    N = max(len(preds), 1)
-    return ex / N, l1 / N, l2 / N
-
-
-def _path_selection(token_ids, E, none_idx, sos=1, eos=2):
+def _path_selection(token_ids, E, none_idx, eps=0.5, sos=1, eos=2):
     """
-    Graph path selection using argmax right-neighbor pointers.
+    DAG longest-path selection via topological sort DP.
 
-    token_ids : list[int]  corrected token ids from SCH (length N)
-    E         : np.ndarray [N, N]  edge_scores = right_scores + left_scores.T
-                right_scores[i,j] = P(right neighbor of i is j)  (softmax, sums to 1)
-                E[i,j] is highest when both i thinks j is its right and j thinks i is its left.
+    Paper Sec 3.4:
+      E_ij = right_score(i→j) + left_score(j→i)  — already computed by caller
+      Delete edges below eps ONLY IF removing them does not disconnect
+      SOS from EOS. Then find longest path via topological sort DP.
 
-    WHY NOT eps threshold:
-      right_scores is a softmax over N tokens.  For N=20, uniform ≈ 0.05.
-      eps=0.5 would filter virtually every edge → Bellman-Ford sees empty graph
-      → always falls back to column-sorted list → PGD completely bypassed.
-
-    CORRECT approach: use argmax right-pointer to build a deterministic chain.
-      right_ptr[i] = argmax_j E[i,j]   (best right neighbor of i)
-      Then trace: SOS → right_ptr[SOS] → ... → EOS
+    token_ids : list[int]  corrected token ids (length N), includes SOS/EOS
+    E         : np.ndarray [N, N]  edge score matrix (from compute_scores)
     """
     N = len(token_ids)
     if N == 0:
@@ -47,30 +20,118 @@ def _path_selection(token_ids, E, none_idx, sos=1, eos=2):
 
     sos_nodes = [i for i, t in enumerate(token_ids) if t == sos]
     eos_nodes = [i for i, t in enumerate(token_ids) if t == eos]
-
     if not sos_nodes or not eos_nodes:
         return [t for t in token_ids if t not in (none_idx, sos, eos)]
 
     start = sos_nodes[0]
     end   = eos_nodes[0]
 
-    # Build right-pointer chain from argmax of edge matrix
-    right_ptr = E.argmax(axis=1)   # [N]  for each node, best right neighbor
+    def _build_adj(threshold):
+        """Build adjacency list with edges >= threshold."""
+        adj = defaultdict(list)
+        for i in range(N):
+            for j in range(N):
+                if i != j and float(E[i, j]) >= threshold:
+                    adj[i].append((j, float(E[i, j])))
+        return adj
 
-    path = []
-    cur  = start
-    seen = set()
-    while cur != end and cur not in seen and len(path) < N + 2:
+    def _has_path(adj, src, dst):
+        """BFS reachability check."""
+        visited = set()
+        queue   = [src]
+        while queue:
+            u = queue.pop()
+            if u == dst:
+                return True
+            if u in visited:
+                continue
+            visited.add(u)
+            for v, _ in adj[u]:
+                queue.append(v)
+        return False
+
+    # Build full graph first, then prune edges below eps
+    # but ONLY if the pruned graph still connects SOS → EOS (paper condition)
+    adj_full = _build_adj(0.0)
+    adj_pruned = _build_adj(eps)
+
+    adj = adj_pruned if _has_path(adj_pruned, start, end) else adj_full
+
+    # Topological sort DP for longest path (paper: O(V+E), DAG assumed)
+    # Use DFS-based topological ordering
+    visited   = set()
+    topo      = []
+
+    def _dfs(u):
+        visited.add(u)
+        for v, _ in adj[u]:
+            if v not in visited:
+                _dfs(v)
+        topo.append(u)
+
+    for u in range(N):
+        if u not in visited:
+            _dfs(u)
+    topo.reverse()   # topological order
+
+    # DP: dist[v] = longest path weight from start to v
+    dist = {u: float('-inf') for u in range(N)}
+    prev = {u: -1 for u in range(N)}
+    dist[start] = 0.0
+
+    for u in topo:
+        if dist[u] == float('-inf'):
+            continue
+        for v, w in adj[u]:
+            if dist[u] + w > dist[v]:
+                dist[v] = dist[u] + w
+                prev[v] = u
+
+    # Traceback from end
+    if dist[end] == float('-inf'):
+        # No path found — fallback to column-sorted visible tokens
+        return [t for t in token_ids if t not in (none_idx, sos, eos)]
+
+    path, cur, seen = [], end, set()
+    while cur != -1 and cur not in seen:
         seen.add(cur)
         path.append(cur)
-        cur = int(right_ptr[cur])
+        cur = prev[cur]
+    path.reverse()
 
-    if cur == end:
-        path.append(end)
+    if not path or path[0] != start:
+        return [t for t in token_ids if t not in (none_idx, sos, eos)]
 
-    # Valid path must start at SOS and end at EOS
-    if len(path) >= 2 and path[0] == start and path[-1] == end:
-        return [token_ids[i] for i in path if token_ids[i] not in (sos, eos, none_idx)]
+    return [token_ids[i] for i in path if token_ids[i] not in (sos, eos, none_idx)]
 
-    # Fallback: column-sorted order (same as before, but now only triggers on cycle)
-    return [t for t in token_ids if t not in (none_idx, sos, eos)]
+
+def compute_exprate(preds, gts):
+    """
+    ExpRate, ExpRate≤1, ExpRate≤2.
+    preds: list of predicted token lists (decoded)
+    gts:   list of ground-truth token lists
+    """
+    assert len(preds) == len(gts)
+    exact = lev1 = lev2 = 0
+    for p, g in zip(preds, gts):
+        p = list(p); g = list(g)
+        if p == g:
+            exact += 1; lev1 += 1; lev2 += 1
+        elif _edit_distance(p, g) <= 1:
+            lev1 += 1; lev2 += 1
+        elif _edit_distance(p, g) <= 2:
+            lev2 += 1
+    n = len(preds)
+    return exact / n, lev1 / n, lev2 / n
+
+
+def _edit_distance(s1, s2):
+    m, n = len(s1), len(s2)
+    dp = list(range(n + 1))
+    for i in range(1, m + 1):
+        prev = dp[0]; dp[0] = i
+        for j in range(1, n + 1):
+            tmp = dp[j]
+            dp[j] = prev if s1[i-1] == s2[j-1] else 1 + min(prev, dp[j], dp[j-1])
+            prev = tmp
+    return dp[n]

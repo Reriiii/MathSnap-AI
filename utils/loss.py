@@ -6,13 +6,8 @@ import torch.nn.functional as F
 class NAMERLoss(nn.Module):
     """
     L_all = L_VAT + lambda * L_PGD
-    L_PGD = L_self + w_conn * (L_left + L_right)
-
-    VAT class weight:
-      Background (none_idx) chiếm ~98% spatial positions.
-      none_weight=0.05 → avg_det=35 (FP flood, prec=26%)
-      none_weight=1.00 → avg_det=15 (rec=73%, misses tokens)
-      none_weight=0.20 → target: prec~60%, rec~85%, avg_det~18
+    L_PGD = L_self + L_left + L_right   (equal weights, per paper Eq 8)
+    L_VAT = CrossEntropy(P, P*)          (plain CE, per paper Eq 3, no background weight)
     """
     def __init__(self, lam: float = 0.5, w_conn: float = 1.0,
                  none_idx: int = 4, vocab_size: int = 191):
@@ -21,18 +16,15 @@ class NAMERLoss(nn.Module):
         self.w_conn   = w_conn
         self.none_idx = none_idx
 
-        vat_weight           = torch.ones(vocab_size)
-        vat_weight[none_idx] = 0.20   # tuned: balance prec/rec
-        self.register_buffer('vat_weight', vat_weight)
-
-        self.vat_ce  = nn.CrossEntropyLoss(weight=self.vat_weight)
+        # Plain CE — no background weighting (paper Eq 3)
+        self.vat_ce  = nn.CrossEntropyLoss()
         self.pgd_ce  = nn.CrossEntropyLoss(ignore_index=-100)
         self.conn_ce = nn.CrossEntropyLoss()
 
     def forward(self, out, vat_tgt, pgd_tgt, l_tgt, r_tgt, mask):
         B, L = pgd_tgt.shape
 
-        # VAT loss
+        # VAT loss (plain CE, paper Eq 3)
         L_vat = self.vat_ce(out['vat_logits'], vat_tgt)
 
         # PGD self-correction loss
