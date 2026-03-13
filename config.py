@@ -1,95 +1,118 @@
+"""
+Configuration for HMER DenseNet + Transformer pipeline.
+"""
+
+import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Tuple
+
+
+@dataclass
+class DataConfig:
+    """Data and preprocessing configuration."""
+    raw_dir: str = "dataset/raw"
+    processed_dir: str = "dataset/processed"
+    vocab_path: str = "dataset/processed/vocab.json"
+
+    # Image settings
+    img_height: int = 128
+    img_max_width: int = 512
+    img_channels: int = 1  # grayscale
+
+    # Sequence settings
+    max_seq_len: int = 200
+
+    # DataLoader
+    batch_size: int = 48
+    num_workers: int = 8
+    pin_memory: bool = True
+
+    # Augmentation
+    augment: bool = True
+    rotation_range: float = 5.0       # degrees
+    scale_range: Tuple[float, float] = (0.9, 1.1)
+    shear_range: float = 0.1
+    brightness_range: Tuple[float, float] = (0.7, 1.3)
+    contrast_range: Tuple[float, float] = (0.7, 1.3)
+    noise_std: float = 0.02
+    elastic_alpha: float = 30.0
+    elastic_sigma: float = 4.0
+    erosion_dilation_prob: float = 0.3
+    erosion_dilation_kernel: int = 2
+
+
+@dataclass
+class EncoderConfig:
+    """DenseNet encoder configuration."""
+    in_channels: int = 1
+    growth_rate: int = 32
+    block_config: Tuple[int, ...] = (6, 12, 24, 16)  # DenseNet-121 style
+    num_init_features: int = 64
+    bn_size: int = 4
+    drop_rate: float = 0.2
+    compression: float = 0.5
+
+
+@dataclass
+class DecoderConfig:
+    """Transformer decoder configuration."""
+    d_model: int = 512
+    nhead: int = 8
+    num_layers: int = 6
+    dim_feedforward: int = 2048
+    dropout: float = 0.3
+    max_seq_len: int = 200
+
+
+@dataclass
+class TrainConfig:
+    """Training configuration."""
+    epochs: int = 200
+    lr: float = 2e-4
+    min_lr: float = 1e-7
+    weight_decay: float = 1e-4
+    warmup_epochs: int = 10
+    label_smoothing: float = 0.1
+
+    # Gradient clipping
+    grad_clip: float = 5.0
+
+    # Mixed precision
+    use_amp: bool = True
+
+    # Early stopping
+    patience: int = 20
+
+    # Checkpointing
+    checkpoint_dir: str = "checkpoints"
+    save_best_only: bool = True
+
+    # Logging
+    log_interval: int = 50  # log every N batches
+
+    # Output
+    output_dir: str = "outputs"
+
+    # Beam search
+    beam_size: int = 5
 
 
 @dataclass
 class Config:
-    """NAMER training configuration."""
+    """Full configuration."""
+    data: DataConfig = field(default_factory=DataConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
+    decoder: DecoderConfig = field(default_factory=DecoderConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
 
-    # ── Paths ──────────────────────────────────────────────────────────────
-    data_root:  str          = 'D://dataset/HME100K'
-    label_file: str          = 'D://dataset/HME100K/train.txt'
-    checkpoint_dir: str      = './checkpoints'
-    vocab_path: str          = './vocab.json'
-    resume_checkpoint: Optional[str] = None
-    # Path to pretrained DWAP checkpoint (used for VAT bipartite matching positions).
-    # Set to None to fall back to uniform-spread position estimate.
-    dwap_checkpoint: Optional[str]  = None
+    # Device
+    device: str = "cuda"
 
-    # ── Split ──────────────────────────────────────────────────────────────
-    train_ratio: float = 0.80
-    val_ratio:   float = 0.10
+    # Random seed
+    seed: int = 42
 
-    # ── Training ──────────────────────────────────────────────────────────
-    epochs:       int   = 40
-    batch_size:   int   = 32
-    lr:           float = 2e-4      # paper: 2e-4
-    lambda_pgd:   float = 0.5       # paper: lambda=0.5
-    w_conn:       float = 1.0       # paper: equal weight on left/right connectivity
-    augment:      bool  = False
-    eval_every:   int   = 5
-    log_interval: int   = 50
-
-    # ── VAT recall tuning ─────────────────────────────────────────────────
-    # Weight applied to the background (∅) class in VAT CrossEntropyLoss.
-    # Paper uses plain CE (none_weight=1.0).  In practice plain CE causes
-    # VAT recall to plateau at ~61%, starving PGD of tokens.
-    #
-    # none_weight=0.50 reduces background penalty: the model predicts more
-    # real tokens (higher recall) at the cost of slightly more false positives
-    # (lower precision).  PGD can tolerate FP but NOT missing tokens.
-    #
-    # Tuning guide:
-    #   none_weight=1.00  →  rec≈61%  prec≈64%  avg_det≈8
-    #   none_weight=0.50  →  rec≈80%  prec≈58%  avg_det≈12  ← recommended
-    #   none_weight=0.20  →  rec≈90%  prec≈42%  avg_det≈22  ← too many FP
-    none_weight: float = 0.30
-
-    # ── Model (paper defaults) ─────────────────────────────────────────────
-    d_model:    int   = 256
-    nhead:      int   = 8
-    pgd_layers: int   = 3     # paper: three-layer Transformer in PGD
-    drop:       float = 0.3
-    img_h:      int   = 128
-    img_w:      int   = 512
-    max_len:    int   = 200
-
-    # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 2
-    seed:        int = 42
-
-
-@dataclass
-class DWAPConfig:
-    """DWAP pretraining configuration."""
-
-    # ── Paths (same dataset as NAMER) ─────────────────────────────────────
-    data_root:  str = 'D://dataset/HME100K'
-    label_file: str = 'D://dataset/HME100K/train.txt'
-    checkpoint_dir: str = './checkpoints'
-    vocab_path: str = './vocab.json'
-    resume_checkpoint: Optional[str] = None
-
-    # ── Split ──────────────────────────────────────────────────────────────
-    train_ratio: float = 0.80
-    val_ratio:   float = 0.10
-
-    # ── Training ──────────────────────────────────────────────────────────
-    epochs:      int   = 15
-    batch_size:  int   = 32
-    lr:          float = 1e-3
-    augment:     bool  = False
-    eval_every:  int   = 5
-    log_interval: int  = 50
-
-    # ── Model ──────────────────────────────────────────────────────────────
-    d:       int   = 256
-    emb_dim: int   = 256
-    drop:    float = 0.3
-    img_h:   int   = 128
-    img_w:   int   = 512
-    max_len: int   = 200
-
-    # ── Misc ───────────────────────────────────────────────────────────────
-    num_workers: int = 2
-    seed:        int = 42
+    def __post_init__(self):
+        """Ensure directories exist."""
+        os.makedirs(self.data.processed_dir, exist_ok=True)
+        os.makedirs(self.train.checkpoint_dir, exist_ok=True)
+        os.makedirs(self.train.output_dir, exist_ok=True)

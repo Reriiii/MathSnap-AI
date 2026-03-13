@@ -1,207 +1,314 @@
+"""
+CROHME dataset with augmentation for HMER.
+
+Loads image-LaTeX pairs from preprocessed CSV files.
+Applies paper-simulation augmentations for training.
+"""
+
+import csv
 import random
-from functools import partial
+import numpy as np
 from pathlib import Path
+from typing import List, Tuple, Optional, Dict
 
 import torch
-from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from tqdm.auto import tqdm
+from PIL import Image, ImageFilter, ImageOps
+import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 
-from .vocab import Vocabulary
-
-# ── Data cleaning ─────────────────────────────────────────────────────────────
-_NORMALIZE_TOK = {
-    '√': '\\sqrt', '×': '\\times', '÷': '\\div',  '±': '\\pm',
-    '≤': '\\leq',  '≥': '\\geq',   '≠': '\\neq',  '≈': '\\approx',
-    '∞': '\\infty','→': '\\rightarrow', '←': '\\leftarrow',
-    '∈': '\\in',   '∩': '\\cap',   '∪': '\\cup',
-    '∑': '\\sum',  '∏': '\\prod',  '∫': '\\int',
-    'π': '\\pi',   'α': '\\alpha', 'β': '\\beta',  'γ': '\\gamma',
-    'θ': '\\theta','λ': '\\lambda','μ': '\\mu',    'σ': '\\sigma',
-    'φ': '\\phi',  'ω': '\\omega',
-    '²': '^{2}',   '³': '^{3}',
-    '、': ',',      '。': '.', '，': ',', '．': '.', '！': '!', '？': '?',
-}
-_NOISE_TOKENS = {'"', "'", '…', '—', '–'}
+from data.vocab import Vocab
 
 
-def _is_chinese(token: str) -> bool:
-    return any('\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf'
-               for c in token)
+class CROHMEDataset(Dataset):
+    """
+    CROHME dataset for handwritten math expression recognition.
 
+    Loads grayscale images and their LaTeX label sequences.
+    Applies augmentation during training to simulate real paper conditions.
+    """
 
-def _clean_tokens(tokens: list) -> list:
-    return [_NORMALIZE_TOK.get(t, t) for t in tokens]
+    def __init__(
+        self,
+        csv_path: str,
+        vocab: Vocab,
+        img_height: int = 128,
+        img_max_width: int = 512,
+        max_seq_len: int = 200,
+        augment: bool = False,
+        aug_config: dict = None,
+    ):
+        """
+        Args:
+            csv_path: path to processed CSV file with (image_path, latex) columns
+            vocab: Vocab instance for encoding labels
+            img_height: target image height
+            img_max_width: maximum image width (pad/crop to this)
+            max_seq_len: maximum label sequence length
+            augment: whether to apply augmentation
+            aug_config: augmentation parameters dict
+        """
+        self.vocab = vocab
+        self.img_height = img_height
+        self.img_max_width = img_max_width
+        self.max_seq_len = max_seq_len
+        self.augment = augment
+        self.aug_config = aug_config or {}
 
+        # Load data entries
+        self.entries = []
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                self.entries.append({
+                    'image_path': row['image_path'],
+                    'latex': row['latex']
+                })
 
-def _parse_label_file(path: str, data_root: str, max_len: int):
-    root = Path(data_root)
-    samples = []
-    n_notab = n_miss = n_long = n_empty = n_chinese = n_noise = 0
+        print(f"Loaded {len(self.entries)} samples from {csv_path}")
 
-    with open(path, encoding='utf-8') as f:
-        for lineno, raw in enumerate(f, 1):
-            line = raw.rstrip('\n')
-            if not line.strip():
-                continue
-            if '\t' not in line:
-                n_notab += 1
-                if n_notab <= 3:
-                    tqdm.write(f"  WARNING line {lineno}: no TAB → {line[:60]!r}")
-                continue
-            img_name, latex = line.split('\t', 1)
-            img_path = root / img_name.strip()
-            if not img_path.exists():
-                n_miss += 1
-                continue
-            tokens = _clean_tokens(latex.strip().split())
-            if not tokens:
-                n_empty += 1
-                continue
-            if len(tokens) > max_len - 2:
-                n_long += 1
-                continue
-            if any(_is_chinese(t) for t in tokens):
-                n_chinese += 1
-                continue
-            if set(tokens) & _NOISE_TOKENS:
-                n_noise += 1
-                continue
-            samples.append({'img_path': str(img_path),
-                            'latex':    ' '.join(tokens),
-                            'tokens':   tokens})
+    def __len__(self):
+        return len(self.entries)
 
-    tqdm.write(
-        f"Parsed {Path(path).name}: {len(samples):,} ok | "
-        f"no-tab={n_notab} | missing={n_miss} | too-long={n_long} | "
-        f"empty={n_empty} | chinese={n_chinese} | noise={n_noise}"
-    )
-    return samples
+    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        entry = self.entries[idx]
 
+        # Load image
+        img = Image.open(entry['image_path']).convert('L')  # grayscale
 
-def _split3(samples, train_r, val_r, seed):
-    rng = random.Random(seed)
-    idx = list(range(len(samples)))
-    rng.shuffle(idx)
-    n  = len(idx)
-    n1 = int(n * train_r)
-    n2 = int(n * val_r)
-    train_s = [samples[i] for i in idx[:n1]]
-    val_s   = [samples[i] for i in idx[n1:n1+n2]]
-    test_s  = [samples[i] for i in idx[n1+n2:]]
-    test_r  = max(0.0, 1.0 - train_r - val_r)
-    tqdm.write(
-        f"Split {train_r:.0%}/{val_r:.0%}/{test_r:.0%} → "
-        f"train={len(train_s):,} | val={len(val_s):,} | test={len(test_s):,}"
-    )
-    return train_s, val_s, test_s
+        # Apply augmentation
+        if self.augment:
+            img = self._augment(img)
 
+        # Resize and pad
+        img = self._resize_and_pad(img)
 
-class HME100KDataset(Dataset):
-    def __init__(self, samples, vocab: Vocabulary, img_h, img_w,
-                 augment=False, name='?'):
-        self.samples = samples
-        self.vocab   = vocab
-        self.name    = name
-        self.tf      = self._build_tf(img_h, img_w, augment)
-        tqdm.write(f"Dataset [{name}]: {len(samples):,} samples")
+        # Convert to tensor and normalize
+        img_tensor = TF.to_tensor(img)  # [1, H, W], values in [0, 1]
+        img_tensor = TF.normalize(img_tensor, mean=[0.5], std=[0.5])  # [-1, 1]
 
-    @staticmethod
-    def _build_tf(h, w, augment):
-        ops = []
-        if augment:
-            ops += [transforms.RandomAffine(
-                degrees=10, scale=(0.7, 1.1), fill=255,
-            )]
-        ops += [
-            transforms.Grayscale(num_output_channels=3),
-            transforms.Resize((h, w)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-        return transforms.Compose(ops)
+        # Encode label
+        label_indices = self.vocab.encode(entry['latex'], add_sos=True, add_eos=True)
 
-    def __len__(self): return len(self.samples)
+        # Truncate if needed
+        if len(label_indices) > self.max_seq_len:
+            label_indices = label_indices[:self.max_seq_len - 1] + [self.vocab.eos_idx]
 
-    def __getitem__(self, idx):
-        s = self.samples[idx]
-        try:
-            # Ảnh toán học là chữ đen giấy trắng -> load trực tiếp thành Grayscale (kênh L)
-            # Sau đó convert sang RGB vì mạng DenseNet yêu cầu input 3 kênh
-            img = Image.open(s['img_path']).convert('L').convert('RGB')
-        except Exception:
-            img = Image.new('RGB', (512, 128), 255)
-        tids = ([self.vocab.sos_idx]
-                + self.vocab.encode(s['tokens'])
-                + [self.vocab.eos_idx])
+        label_tensor = torch.tensor(label_indices, dtype=torch.long)
+
         return {
-            'image':     self.tf(img),
-            'token_ids': torch.tensor(tids, dtype=torch.long),
-            'latex':     s['latex'],
-            'tokens':    s['tokens'],
-            'img_path':  s['img_path']
+            'image': img_tensor,
+            'target': label_tensor,
+            'latex': entry['latex'],
+            'image_path': entry['image_path']
         }
 
+    def _resize_and_pad(self, img: Image.Image) -> Image.Image:
+        """Resize image to target height maintaining aspect ratio, then pad width."""
+        w, h = img.size
+        # Calculate new width maintaining aspect ratio
+        new_h = self.img_height
+        new_w = int(w * (new_h / h))
 
-def _collate(batch, pad_idx):
-    imgs  = torch.stack([b['image'] for b in batch])
-    maxL  = max(b['token_ids'].size(0) for b in batch)
-    tids  = torch.full((len(batch), maxL), pad_idx, dtype=torch.long)
-    for i, b in enumerate(batch):
-        L = b['token_ids'].size(0)
-        tids[i, :L] = b['token_ids']
+        # Cap width
+        if new_w > self.img_max_width:
+            new_w = self.img_max_width
+
+        img = img.resize((new_w, new_h), Image.BILINEAR)
+
+        # Pad to max width (right padding with white)
+        if new_w < self.img_max_width:
+            padded = Image.new('L', (self.img_max_width, new_h), 255)
+            padded.paste(img, (0, 0))
+            img = padded
+
+        return img
+
+    def _augment(self, img: Image.Image) -> Image.Image:
+        """
+        Apply augmentation to simulate handwritten expressions on paper.
+
+        Includes: rotation, affine, perspective, noise, erosion/dilation,
+        brightness/contrast variation, and paper texture simulation.
+        """
+        cfg = self.aug_config
+
+        # 1. Random rotation
+        rotation_range = cfg.get('rotation_range', 5.0)
+        if random.random() < 0.5:
+            angle = random.uniform(-rotation_range, rotation_range)
+            img = img.rotate(angle, fillcolor=255, expand=False)
+
+        # 2. Random affine (scale + shear)
+        scale_range = cfg.get('scale_range', (0.9, 1.1))
+        shear_range = cfg.get('shear_range', 0.1)
+        if random.random() < 0.5:
+            scale = random.uniform(*scale_range)
+            shear_x = random.uniform(-shear_range, shear_range)
+            shear_y = random.uniform(-shear_range, shear_range)
+            w, h = img.size
+            img = TF.affine(
+                img,
+                angle=0,
+                translate=(0, 0),
+                scale=scale,
+                shear=(shear_x * 180, shear_y * 180),
+                fill=255
+            )
+
+        # 3. Random perspective distortion
+        if random.random() < 0.3:
+            img = TF.to_tensor(img)
+            img = T.RandomPerspective(distortion_scale=0.1, p=1.0, fill=1.0)(img)
+            img = TF.to_pil_image(img)
+
+        # 4. Brightness and contrast jitter
+        brightness_range = cfg.get('brightness_range', (0.7, 1.3))
+        contrast_range = cfg.get('contrast_range', (0.7, 1.3))
+        if random.random() < 0.5:
+            brightness_factor = random.uniform(*brightness_range)
+            img = TF.adjust_brightness(img, brightness_factor)
+        if random.random() < 0.5:
+            contrast_factor = random.uniform(*contrast_range)
+            img = TF.adjust_contrast(img, contrast_factor)
+
+        # 5. Erosion/dilation (stroke thickness variation)
+        erosion_dilation_prob = cfg.get('erosion_dilation_prob', 0.3)
+        kernel_size = cfg.get('erosion_dilation_kernel', 2)
+        if random.random() < erosion_dilation_prob:
+            if random.random() < 0.5:
+                # Dilation (thicker strokes) - using MinFilter
+                img = img.filter(ImageFilter.MinFilter(kernel_size + 1))
+            else:
+                # Erosion (thinner strokes) - using MaxFilter
+                img = img.filter(ImageFilter.MaxFilter(kernel_size + 1))
+
+        # 6. Gaussian noise
+        noise_std = cfg.get('noise_std', 0.02)
+        if random.random() < 0.4:
+            img_np = np.array(img, dtype=np.float32) / 255.0
+            noise = np.random.normal(0, noise_std, img_np.shape)
+            img_np = np.clip(img_np + noise, 0, 1)
+            img = Image.fromarray((img_np * 255).astype(np.uint8))
+
+        # 7. Gaussian blur (simulate slight paper texture / scan blur)
+        if random.random() < 0.2:
+            radius = random.uniform(0.3, 1.0)
+            img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+
+        # 8. Random elastic deformation
+        elastic_alpha = cfg.get('elastic_alpha', 30.0)
+        elastic_sigma = cfg.get('elastic_sigma', 4.0)
+        if random.random() < 0.3:
+            img = self._elastic_transform(img, elastic_alpha, elastic_sigma)
+
+        return img
+
+    def _elastic_transform(
+        self, img: Image.Image, alpha: float, sigma: float
+    ) -> Image.Image:
+        """Apply elastic deformation to simulate natural handwriting variation."""
+        from scipy.ndimage import gaussian_filter, map_coordinates
+
+        img_np = np.array(img, dtype=np.float32)
+        shape = img_np.shape
+
+        # Generate random displacement field
+        dx = gaussian_filter(
+            (np.random.rand(*shape) * 2 - 1), sigma, mode="constant", cval=0
+        ) * alpha
+        dy = gaussian_filter(
+            (np.random.rand(*shape) * 2 - 1), sigma, mode="constant", cval=0
+        ) * alpha
+
+        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+        indices = [np.clip(y + dy, 0, shape[0] - 1), np.clip(x + dx, 0, shape[1] - 1)]
+
+        distorted = map_coordinates(img_np, indices, order=1, mode='constant', cval=255)
+
+        return Image.fromarray(distorted.astype(np.uint8))
+
+
+def collate_fn(batch: List[dict]) -> dict:
+    """
+    Custom collate function to handle variable-length sequences.
+
+    Pads targets to the same length within the batch.
+    Images are already padded to img_max_width.
+    """
+    images = torch.stack([item['image'] for item in batch])
+
+    # Get max target length in this batch
+    max_len = max(item['target'].size(0) for item in batch)
+
+    # Pad targets (with PAD=0 index)
+    padded_targets = torch.zeros(len(batch), max_len, dtype=torch.long)
+    for i, item in enumerate(batch):
+        tgt = item['target']
+        padded_targets[i, :tgt.size(0)] = tgt
+
     return {
-        'image':     imgs,
-        'token_ids': tids,
-        'latex':     [b['latex']  for b in batch],
-        'tokens':    [b['tokens'] for b in batch],
-        'img_path':  [b['img_path'] for b in batch],
+        'image': images,
+        'target': padded_targets,
+        'latex': [item['latex'] for item in batch],
+        'image_path': [item['image_path'] for item in batch]
     }
 
 
-def build_datasets(cfg):
-    """Parse label file, split 80/10/10, load/build vocab."""
-    import os
-    all_s = _parse_label_file(cfg.label_file, cfg.data_root, cfg.max_len)
-    train_s, val_s, test_s = _split3(all_s, cfg.train_ratio, cfg.val_ratio, cfg.seed)
+def get_dataloader(
+    split: str,
+    vocab: Vocab,
+    config=None,
+    shuffle: bool = None,
+) -> DataLoader:
+    """
+    Create a DataLoader for a given split.
 
-    if os.path.exists(cfg.vocab_path):
-        vocab = Vocabulary.load(cfg.vocab_path)
-        current_tokens = {t for s in all_s for t in s['tokens']}
-        unknown = current_tokens - set(vocab.t2i.keys())
-        if unknown:
-            tqdm.write(
-                f"  WARNING: {len(unknown)} tokens in data NOT in vocab. "
-                f"Delete {cfg.vocab_path} and re-run to rebuild."
-            )
-    else:
-        vocab = Vocabulary.build([s['tokens'] for s in all_s])
-        vocab.save(cfg.vocab_path)
+    Args:
+        split: 'train', 'val', or 'test'
+        vocab: Vocab instance
+        config: Config instance (uses defaults if None)
+        shuffle: override shuffle (default: True for train, False otherwise)
+    """
+    from config import Config
 
-    kw = dict(img_h=cfg.img_h, img_w=cfg.img_w)
-    return (
-        HME100KDataset(train_s, vocab, augment=cfg.augment, name='train', **kw),
-        HME100KDataset(val_s,   vocab, augment=False,       name='val',   **kw),
-        HME100KDataset(test_s,  vocab, augment=False,       name='test',  **kw),
-        vocab,
+    if config is None:
+        config = Config()
+
+    csv_path = f"{config.data.processed_dir}/{split}.csv"
+
+    if shuffle is None:
+        shuffle = (split == 'train')
+
+    aug_config = {
+        'rotation_range': config.data.rotation_range,
+        'scale_range': config.data.scale_range,
+        'shear_range': config.data.shear_range,
+        'brightness_range': config.data.brightness_range,
+        'contrast_range': config.data.contrast_range,
+        'noise_std': config.data.noise_std,
+        'elastic_alpha': config.data.elastic_alpha,
+        'elastic_sigma': config.data.elastic_sigma,
+        'erosion_dilation_prob': config.data.erosion_dilation_prob,
+        'erosion_dilation_kernel': config.data.erosion_dilation_kernel,
+    }
+
+    dataset = CROHMEDataset(
+        csv_path=csv_path,
+        vocab=vocab,
+        img_height=config.data.img_height,
+        img_max_width=config.data.img_max_width,
+        max_seq_len=config.data.max_seq_len,
+        augment=(split == 'train' and config.data.augment),
+        aug_config=aug_config,
     )
 
-
-def build_loaders(cfg, vocab):
-    """Build train/val/test DataLoaders given pre-built datasets."""
-    all_s = _parse_label_file(cfg.label_file, cfg.data_root, cfg.max_len)
-    train_s, val_s, test_s = _split3(all_s, cfg.train_ratio, cfg.val_ratio, cfg.seed)
-    kw   = dict(img_h=cfg.img_h, img_w=cfg.img_w)
-    col  = partial(_collate, pad_idx=vocab.pad_idx)
-    dkw  = dict(collate_fn=col, pin_memory=True,
-                num_workers=getattr(cfg, 'num_workers', 2))
-    train_ds = HME100KDataset(train_s, vocab, augment=getattr(cfg,'augment',False),
-                               name='train', **kw)
-    val_ds   = HME100KDataset(val_s,   vocab, augment=False, name='val',   **kw)
-    test_ds  = HME100KDataset(test_s,  vocab, augment=False, name='test',  **kw)
-    train_ldr = DataLoader(train_ds, cfg.batch_size, shuffle=True,
-                           drop_last=True, **dkw)
-    val_ldr   = DataLoader(val_ds,   cfg.batch_size, shuffle=False, **dkw)
-    test_ldr  = DataLoader(test_ds,  cfg.batch_size, shuffle=False, **dkw)
-    return train_ldr, val_ldr, test_ldr
+    return DataLoader(
+        dataset,
+        batch_size=config.data.batch_size,
+        shuffle=shuffle,
+        num_workers=config.data.num_workers,
+        pin_memory=config.data.pin_memory,
+        collate_fn=collate_fn,
+        drop_last=(split == 'train'),
+    )
