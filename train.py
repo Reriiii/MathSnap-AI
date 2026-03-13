@@ -137,6 +137,7 @@ def validate(model, dataloader, vocab, criterion, config):
     all_predictions = []
     all_targets = []
     all_images = []
+    all_image_paths = []
 
     for batch in tqdm(dataloader, desc="Validating", leave=False):
         images = batch['image'].to(config.device)
@@ -168,9 +169,10 @@ def validate(model, dataloader, vocab, criterion, config):
             all_predictions.append(pred_str)
             all_targets.append(tgt_str)
 
-        # Save some images for visualization
+        # Save some images and paths for visualization
         if len(all_images) < 16:
             all_images.append(images.cpu().numpy())
+            all_image_paths.extend(batch['image_path'])
 
     # Compute metrics
     exprate_metrics = compute_exprate(all_predictions, all_targets)
@@ -190,7 +192,7 @@ def validate(model, dataloader, vocab, criterion, config):
     else:
         vis_images = None
 
-    return metrics, all_predictions[:16], all_targets[:16], vis_images
+    return metrics, all_predictions[:16], all_targets[:16], vis_images, all_image_paths[:16]
 
 
 def main():
@@ -341,7 +343,7 @@ def main():
         )
 
         # Validate
-        val_metrics, val_preds, val_targets, val_images = validate(
+        val_metrics, val_preds, val_targets, val_images, val_paths = validate(
             model, val_loader, vocab, criterion, config
         )
 
@@ -420,6 +422,7 @@ def main():
                     val_preds[:8],
                     val_targets[:8],
                     config.train.output_dir,
+                    image_paths=val_paths[:8],
                 )
 
         # Early stopping
@@ -441,7 +444,8 @@ def main():
             val_preds[:8],
             val_targets[:8],
             config.train.output_dir,
-            filename="final_predictions.png"
+            filename="final_predictions.png",
+            image_paths=val_paths[:8],
         )
 
     print(f"\nTraining complete!")

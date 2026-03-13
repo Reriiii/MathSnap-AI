@@ -14,6 +14,12 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 
 
+# Mapping from non-standard SymLG labels to valid LaTeX tokens
+_LABEL_MAP = {
+    'COMMA': ',',
+}
+
+
 def parse_symlg(filepath: str) -> dict:
     """
     Parse a SymLG (.lg) file into structured data.
@@ -49,6 +55,8 @@ def parse_symlg(filepath: str) -> dict:
                 # Object: O, <id>, <label>, <confidence>, <spatial_chain>
                 obj_id = parts[1]
                 label = parts[2]
+                # Normalize non-standard labels to valid LaTeX
+                label = _LABEL_MAP.get(label, label)
                 objects[obj_id] = label
 
             elif parts[0] == "R" and len(parts) >= 5:
@@ -65,6 +73,47 @@ def parse_symlg(filepath: str) -> dict:
     }
 
 
+def _normalize_relations(objects: dict, relations: list) -> list:
+    """
+    Normalize relation IDs when they don't match object IDs.
+
+    Some .lg files use AUTO_N as object IDs but label_N in relations.
+    This builds a mapping from label_N -> AUTO_N and rewrites the relations.
+    """
+    obj_ids = set(objects.keys())
+
+    # Check if relations reference IDs that exist in objects
+    rel_ids = set()
+    for src_id, dst_id, _ in relations:
+        rel_ids.add(src_id)
+        rel_ids.add(dst_id)
+
+    # If all relation IDs are valid object IDs, no normalization needed
+    if rel_ids.issubset(obj_ids):
+        return relations
+
+    # Build mapping: label_N -> actual object ID
+    # Count occurrences of each label to assign _1, _2, etc.
+    from collections import Counter
+    label_counter = Counter()
+    label_n_to_obj_id = {}
+
+    for obj_id, label in objects.items():
+        label_counter[label] += 1
+        # Create the label_N style ID
+        label_n_id = f"{label}_{label_counter[label]}"
+        label_n_to_obj_id[label_n_id] = obj_id
+
+    # Rewrite relations using the mapping
+    normalized = []
+    for src_id, dst_id, rel_type in relations:
+        new_src = label_n_to_obj_id.get(src_id, src_id)
+        new_dst = label_n_to_obj_id.get(dst_id, dst_id)
+        normalized.append((new_src, new_dst, rel_type))
+
+    return normalized
+
+
 def symlg_to_latex(parsed: dict) -> str:
     """
     Convert parsed SymLG data to a LaTeX token string.
@@ -78,8 +127,10 @@ def symlg_to_latex(parsed: dict) -> str:
     if not objects:
         return ""
 
+    # Normalize relation IDs (handle AUTO_* mismatch)
+    relations = _normalize_relations(objects, relations)
+
     # Build adjacency: for each node, store its children by relation type
-    # children[node_id] = {'Right': [...], 'Sup': [...], 'Sub': [...], 'Above': [...], 'Below': [...]}
     children = defaultdict(lambda: defaultdict(list))
     child_set = set()  # track which nodes appear as children
 
@@ -91,15 +142,29 @@ def symlg_to_latex(parsed: dict) -> str:
     all_nodes = set(objects.keys())
     roots = all_nodes - child_set
 
+    def _count_descendants(node_id, visited=None):
+        if visited is None:
+            visited = set()
+        if node_id in visited:
+            return 0
+        visited.add(node_id)
+        count = 1
+        for rel_type, children_list in children.get(node_id, {}).items():
+            for child_id in children_list:
+                count += _count_descendants(child_id, visited)
+        return count
+
     if not roots:
         # Fallback: pick the first object
         root = list(objects.keys())[0]
-    else:
+    elif len(roots) == 1:
         root = list(roots)[0]
+    else:
+        # Multiple roots: pick the one with the most descendants
+        root = max(roots, key=lambda r: _count_descendants(r))
 
-    # Check if this is a fraction expression
-    # Fractions are indicated by a '-' symbol with Above and Below relations
     def _is_fraction_bar(node_id):
+        """Fractions: '-' symbol with Above and/or Below relations."""
         label = objects.get(node_id, "")
         node_children = children.get(node_id, {})
         return label == "-" and ("Above" in node_children or "Below" in node_children)
@@ -134,6 +199,13 @@ def symlg_to_latex(parsed: dict) -> str:
         else:
             # Regular symbol
             tokens.append(label)
+
+        # Handle Inside (e.g., \sqrt content)
+        if "Inside" in node_children:
+            tokens.append("{")
+            for inside_id in node_children["Inside"]:
+                tokens.extend(_traverse(inside_id, visited))
+            tokens.append("}")
 
         # Handle superscript
         if "Sup" in node_children:

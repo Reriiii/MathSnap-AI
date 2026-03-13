@@ -99,6 +99,7 @@ def plot_sample_predictions(
     output_dir: str = "outputs",
     filename: str = "sample_predictions.png",
     num_samples: int = 8,
+    image_paths: List[str] = None,
 ):
     """
     Display sample predictions alongside ground truth.
@@ -110,11 +111,12 @@ def plot_sample_predictions(
         output_dir: directory to save plot
         filename: output filename
         num_samples: number of samples to show
+        image_paths: optional list of source image file paths
     """
     os.makedirs(output_dir, exist_ok=True)
 
     n = min(num_samples, len(predictions))
-    fig, axes = plt.subplots(n, 1, figsize=(14, 3 * n))
+    fig, axes = plt.subplots(n, 1, figsize=(14, 3.5 * n))
     fig.suptitle('Sample Predictions', fontsize=16, fontweight='bold')
 
     if n == 1:
@@ -143,8 +145,16 @@ def plot_sample_predictions(
         pred_display = predictions[i] if len(predictions[i]) < 80 else predictions[i][:77] + "..."
         tgt_display = targets[i] if len(targets[i]) < 80 else targets[i][:77] + "..."
 
+        # Build title with optional file path
+        title_lines = []
+        if image_paths and i < len(image_paths):
+            path_display = os.path.basename(image_paths[i])
+            title_lines.append(f"File: {image_paths[i]}")
+        title_lines.append(f"GT:   {tgt_display}")
+        title_lines.append(f"Pred: {pred_display}")
+
         ax.set_title(
-            f"GT: {tgt_display}\nPred: {pred_display}",
+            "\n".join(title_lines),
             fontsize=9,
             color=color,
             loc='left'
