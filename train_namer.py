@@ -252,6 +252,7 @@ class Trainer:
                         'coords': [(map_h // 2, 0), (map_h // 2, 0)],
                         'l':      [0, 1],
                         'r':      [1, 1],
+                        'conn':   [0, 0],
                         'total':  2,
                     })
                     continue
@@ -325,28 +326,46 @@ class Trainer:
 
                 # ── 4. Connectivity from GT-filtered sequence (GT without '{') ─
                 # GT-filtered: all non-pad GT tokens except '{'.
-                # The imaginary } appear in this filtered sequence, and their
-                # left/right neighbors define the graph connectivity targets.
+                # Imaginary } tokens appear here too, with their own neighbors.
+                #
+                # CRITICAL: only supervise connectivity when BOTH the token AND
+                # its GT neighbor were detected by VAT.  If either is missing we
+                # have no valid target → mark conn_mask=0 so the loss skips it.
+                # Old self-loop fallback was corrupting L_left: ~33% of targets
+                # were garbage self-loops, flooding the gradient with wrong signal.
                 gt_f_orig = [i for i, t in enumerate(gt_list)
                              if t != pad_idx and t != open_idx]
                 gt_f_toks = [t for t in gt_list
                              if t != pad_idx and t != open_idx]
 
-                l_b = [0]       * total
-                r_b = [eos_pgd] * total   # default: point to EOS (safe fallback)
+                l_b      = [0] * total
+                r_b      = [0] * total
+                conn_b   = [0] * total   # 1 = valid target, 0 = ignore
 
                 for fi, (gt_orig, gt_tok) in enumerate(zip(gt_f_orig, gt_f_toks)):
                     pgd_pos = gt_to_pgd.get(gt_orig, -1)
                     if pgd_pos < 0:
-                        continue   # GT token not detected by VAT → skip
+                        continue   # this token not detected → skip entirely
 
                     l_fi   = fi - 1
                     r_fi   = fi + 1
-                    l_orig = gt_f_orig[l_fi] if l_fi >= 0                    else -1
-                    r_orig = gt_f_orig[r_fi] if r_fi < len(gt_f_orig)        else -1
+                    l_orig = gt_f_orig[l_fi] if l_fi >= 0               else -1
+                    r_orig = gt_f_orig[r_fi] if r_fi < len(gt_f_orig)   else -1
 
-                    l_b[pgd_pos] = gt_to_pgd.get(l_orig, pgd_pos)  # fallback: self
-                    r_b[pgd_pos] = gt_to_pgd.get(r_orig, pgd_pos)  # fallback: self
+                    l_pgd = gt_to_pgd.get(l_orig, -1)
+                    r_pgd = gt_to_pgd.get(r_orig, -1)
+
+                    # Only set valid targets when BOTH neighbors are detected.
+                    # SOS (pos 0) has no left, EOS has no right — handle edges:
+                    #   SOS: l_orig=-1 → l_pgd=-1, but r must be detected
+                    #   EOS: r_orig=-1 → r_pgd=-1, but l must be detected
+                    l_valid = (l_orig == -1) or (l_pgd >= 0)  # -1 = sequence start
+                    r_valid = (r_orig == -1) or (r_pgd >= 0)  # -1 = sequence end
+
+                    if l_valid and r_valid:
+                        l_b[pgd_pos]    = l_pgd if l_pgd >= 0 else pgd_pos
+                        r_b[pgd_pos]    = r_pgd if r_pgd >= 0 else pgd_pos
+                        conn_b[pgd_pos] = 1
 
                 sample_seqs.append({
                     'seq':    pgd_seq,
@@ -354,6 +373,7 @@ class Trainer:
                     'coords': pgd_coords,
                     'l':      l_b,
                     'r':      r_b,
+                    'conn':   conn_b,
                     'total':  total,
                 })
 
@@ -363,6 +383,7 @@ class Trainer:
             pgd_input = torch.full((B, max_l), pad_idx,  dtype=torch.long,  device=dev)
             pgd_tgt   = torch.full((B, max_l), -100,     dtype=torch.long,  device=dev)
             mask      = torch.zeros(B, max_l,                                device=dev)
+            conn_mask = torch.zeros(B, max_l,                                device=dev)
             coords    = torch.zeros(B, max_l, 2,                             device=dev)
             coords[:, :, 0] = map_h // 2
             l_tgt2    = torch.zeros(B, max_l, dtype=torch.long,              device=dev)
@@ -373,6 +394,7 @@ class Trainer:
                 pgd_input[b, :L] = torch.tensor(d['seq'][:L],    dtype=torch.long,  device=dev)
                 pgd_tgt[b,   :L] = torch.tensor(d['tgt'][:L],    dtype=torch.long,  device=dev)
                 mask[b,      :L] = 1.0
+                conn_mask[b, :L] = torch.tensor(d['conn'][:L],   dtype=torch.float, device=dev)
                 coords[b,    :L] = torch.tensor(d['coords'][:L], dtype=torch.float, device=dev)
                 l_tgt2[b,    :L] = torch.tensor(d['l'][:L],      dtype=torch.long,  device=dev)
                 r_tgt2[b,    :L] = torch.tensor(d['r'][:L],      dtype=torch.long,  device=dev)
@@ -392,7 +414,7 @@ class Trainer:
                     'left_logits':    left_logits,
                     'right_logits':   right_logits,
                 }
-                loss, ld = self.loss_fn(out, vat_tgt, pgd_tgt, l_tgt2, r_tgt2, mask)
+                loss, ld = self.loss_fn(out, vat_tgt, pgd_tgt, l_tgt2, r_tgt2, mask, conn_mask)
 
             if not torch.isfinite(loss):
                 tqdm.write(
@@ -510,9 +532,9 @@ class Trainer:
 
             for ids, gt_toks in zip(pred_seqs, batch['tokens']):
                 preds.append(self.vocab.decode(ids))
-                # Strip '{' from GT: VAT never predicts '{' (not a visual token),
-                # and imaginary '}' replaces the need for '{' in the decoded output.
-                gts.append([t for t in gt_toks if t != '{'])
+                # Phase 1: strip both '{' and '}' from GT.
+                # Model doesn't output { (not visual) or } (imaginary disabled).
+                gts.append([t for t in gt_toks if t not in ('{', '}')])
 
         pbar.close()
         if self.device.type == 'cuda':
@@ -712,8 +734,9 @@ def run_training(cfg: Config):
         return max(1e-3, 0.5 * (1.0 + math.cos(math.pi * prog)))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
-    loss_fn   = NAMERLoss(lam=cfg.lambda_pgd, w_conn=cfg.w_conn)
-    tqdm.write(f"Loss: lambda_pgd={cfg.lambda_pgd}  w_conn={cfg.w_conn}")
+    loss_fn   = NAMERLoss(lam=cfg.lambda_pgd, w_conn=cfg.w_conn,
+                         vocab_size=len(vocab), none_weight=cfg.none_weight)
+    tqdm.write(f"Loss: lambda_pgd={cfg.lambda_pgd}  w_conn={cfg.w_conn}  none_weight={cfg.none_weight}")
     tqdm.write(f"LR schedule: warmup 1ep -> {cfg.lr:.0e}, cosine -> {cfg.lr*1e-3:.0e}")
 
     trainer = Trainer(model, optimizer, scheduler, loss_fn,

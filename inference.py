@@ -117,47 +117,56 @@ except Exception as e:
 
 tensor = tf(img).unsqueeze(0).to(DEVICE)
 
+none_idx = vocab.none_idx
+
 with torch.no_grad():
     with torch.amp.autocast(device_type=DEVICE.type, dtype=torch.bfloat16 if DEVICE.type == 'cuda' else torch.float32):
-        pred_ids = model(tensor, token_ids=None)[0]
+        f8x, f16x = model.enc(tensor)
+        probs, _  = model.vat(f8x, f16x)
+
+        # ── VAT-only output (raw, no PGD) ─────────────────────────────────
+        pred_map = probs[0].argmax(dim=0)   # [H, W]
+        tok_mask = (pred_map != none_idx)
+        vat_pos  = tok_mask.nonzero(as_tuple=False)
+        if vat_pos.size(0) > 0:
+            col_order = vat_pos[:, 1].argsort()
+            vat_pos   = vat_pos[col_order]
+            vat_ids   = [pred_map[p[0], p[1]].item() for p in vat_pos]
+            vat_toks  = [vocab.i2t.get(t, '?') for t in vat_ids
+                         if t not in (vocab.sos_idx, vocab.eos_idx, vocab.pad_idx, none_idx)]
+        else:
+            vat_toks = []
+
+        # ── Full pipeline: VAT → imaginary } → PGD → DAG path ────────────
+        # Call _infer directly with vocab (model.forward() doesn't pass vocab!)
+        pred_ids = model._infer(f16x, probs, vocab)[0]
 
 pred_toks  = vocab.decode(pred_ids)
 pred_latex = ' '.join(pred_toks)
-print(f'Pred : {pred_latex}')
-if gt_toks is not None:
-    print(f'Match: {pred_toks == gt_toks}')
 
-# ── VAT detection ─────────────────────────────────────────────────────────────
-print('\n── VAT Detection ──')
-with torch.no_grad():
-    with torch.amp.autocast(device_type=DEVICE.type, dtype=torch.bfloat16 if DEVICE.type == 'cuda' else torch.float32):
-        f8x, f16x   = model.enc(tensor)
-        probs, _    = model.vat(f8x, f16x)
-
-none_idx = vocab.none_idx
-max_probs, pred_map = probs[0].max(dim=0)
-detected = ((pred_map != none_idx) & (max_probs > 0.15)).nonzero(as_tuple=False)
-
-if detected.size(0) == 0:
-    print('  VAT: no tokens detected (model not trained enough)')
-else:
-    print(f'  VAT: {detected.size(0)} tokens detected')
-    if args.verbose:
-        for pos in detected:
-            r, c = pos[0].item(), pos[1].item()
-            tid  = pred_map[r, c].item()
-            tok  = vocab.i2t.get(tid, '?')
-            conf = probs[0, tid, r, c].item()
-            print(f'    [{r:2d},{c:2d}]  {tok:20s}  conf={conf:.3f}')
-    else:
-        tids = [pred_map[p[0], p[1]].item() for p in detected]
-        toks = [vocab.i2t.get(t, '?') for t in tids]
-        col_order = detected[:, 1].argsort()
-        print(f'  Tokens (L→R): {" ".join(toks[i] for i in col_order.tolist())}')
-        print(f'  (use --verbose for per-position confidence)')
-
-# ── Summary ───────────────────────────────────────────────────────────────────
-print('\n── Summary ──')
+# ── Display results ───────────────────────────────────────────────────────────
+print(f'\n── Results ──')
+print(f'  VAT-only ({len(vat_toks):3d} tokens): {" ".join(vat_toks)}')
+print(f'  Full PGD ({len(pred_toks):3d} tokens): {" ".join(pred_toks)}')
 if gt_toks:
-    print(f'  GT   ({len(gt_toks):3d} tokens): {" ".join(gt_toks)}')
-print(f'  Pred ({len(pred_toks):3d} tokens): {" ".join(pred_toks)}')
+    # Phase 1: strip both { and } from GT (model doesn't output either)
+    gt_clean = [t for t in gt_toks if t not in ('{', '}')]
+    print(f'  GT       ({len(gt_toks):3d} tokens): {" ".join(gt_toks)}')
+    print(f'  GT clean ({len(gt_clean):3d} tokens): {" ".join(gt_clean)}')
+
+    from utils.metrics import _edit_dist
+    d_vat  = _edit_dist(vat_toks, gt_clean)
+    d_full = _edit_dist(pred_toks, gt_clean)
+    print(f'\n  Edit dist (VAT vs GT clean):    {d_vat}')
+    print(f'  Edit dist (Full vs GT clean):   {d_full}')
+    print(f'  Match:                          {pred_toks == gt_clean}')
+
+# ── VAT detection detail ──────────────────────────────────────────────────────
+if args.verbose and vat_pos.size(0) > 0:
+    print(f'\n── VAT Detection Detail ({vat_pos.size(0)} positions) ──')
+    for pos in vat_pos:
+        r, c = pos[0].item(), pos[1].item()
+        tid  = pred_map[r, c].item()
+        tok  = vocab.i2t.get(tid, '?')
+        conf = probs[0, tid, r, c].item()
+        print(f'    [{r:2d},{c:2d}]  {tok:20s}  conf={conf:.3f}')

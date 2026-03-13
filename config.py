@@ -12,8 +12,8 @@ class Config:
     checkpoint_dir: str      = './checkpoints'
     vocab_path: str          = './vocab.json'
     resume_checkpoint: Optional[str] = None
-    # Path to pretrained DWAP (used for NAMER training).
-    # Set to None to use uniform-spread position estimate instead.
+    # Path to pretrained DWAP checkpoint (used for VAT bipartite matching positions).
+    # Set to None to fall back to uniform-spread position estimate.
     dwap_checkpoint: Optional[str]  = None
 
     # ── Split ──────────────────────────────────────────────────────────────
@@ -23,30 +23,32 @@ class Config:
     # ── Training ──────────────────────────────────────────────────────────
     epochs:       int   = 40
     batch_size:   int   = 32
-    lr:           float = 2e-4
-    lambda_pgd:   float = 0.5
-    # Connectivity loss weight — paper uses equal weight (1.0).
-    # Was set to 0.01 due to right=500 bug, now fixed (ends count→index).
-    w_conn:       float = 1.0
+    lr:           float = 2e-4      # paper: 2e-4
+    lambda_pgd:   float = 0.5       # paper: lambda=0.5
+    w_conn:       float = 1.0       # paper: equal weight on left/right connectivity
     augment:      bool  = False
     eval_every:   int   = 5
     log_interval: int   = 50
-    # Epochs using GT tokens for PGD (curriculum learning).
-    # Phase 1 [1..pgd_teacher_epochs]:    p_gt = 1.0  (pure teacher forcing)
-    # Phase 2 [teacher..ss_end_epoch]:    p_gt declines linearly 1.0 → 0.0
-    # Phase 3 [ss_end_epoch..epochs]:     p_gt = 0.0  (pure VAT input)
+
+    # ── VAT recall tuning ─────────────────────────────────────────────────
+    # Weight applied to the background (∅) class in VAT CrossEntropyLoss.
+    # Paper uses plain CE (none_weight=1.0).  In practice plain CE causes
+    # VAT recall to plateau at ~61%, starving PGD of tokens.
     #
-    # LR schedule: cosine over phase 1+2, then RESTART at vat_lr_restart
-    # for phase 3. This prevents the LR from dying right when PGD needs to
-    # learn hardest (handling VAT noise with no GT support).
-    pgd_teacher_epochs: int   = 15
-    pgd_ss_end_epoch:   int   = 25
-    vat_lr_restart:     float = 3e-5   # phase-3 restart LR (< initial lr=1e-4)
+    # none_weight=0.50 reduces background penalty: the model predicts more
+    # real tokens (higher recall) at the cost of slightly more false positives
+    # (lower precision).  PGD can tolerate FP but NOT missing tokens.
+    #
+    # Tuning guide:
+    #   none_weight=1.00  →  rec≈61%  prec≈64%  avg_det≈8
+    #   none_weight=0.50  →  rec≈80%  prec≈58%  avg_det≈12  ← recommended
+    #   none_weight=0.20  →  rec≈90%  prec≈42%  avg_det≈22  ← too many FP
+    none_weight: float = 0.30
 
     # ── Model (paper defaults) ─────────────────────────────────────────────
     d_model:    int   = 256
     nhead:      int   = 8
-    pgd_layers: int   = 3     # paper: "three layer Transformer in PGD"
+    pgd_layers: int   = 3     # paper: three-layer Transformer in PGD
     drop:       float = 0.3
     img_h:      int   = 128
     img_w:      int   = 512
@@ -73,7 +75,7 @@ class DWAPConfig:
     val_ratio:   float = 0.10
 
     # ── Training ──────────────────────────────────────────────────────────
-    epochs:      int   = 15       # 10-15 epochs is sufficient for DWAP
+    epochs:      int   = 15
     batch_size:  int   = 32
     lr:          float = 1e-3
     augment:     bool  = False
@@ -81,7 +83,7 @@ class DWAPConfig:
     log_interval: int  = 50
 
     # ── Model ──────────────────────────────────────────────────────────────
-    d:       int   = 256   # attention + GRU hidden dim
+    d:       int   = 256
     emb_dim: int   = 256
     drop:    float = 0.3
     img_h:   int   = 128
