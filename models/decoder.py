@@ -53,12 +53,17 @@ class TransformerDecoder(nn.Module):
         dropout: float = 0.3,
         max_seq_len: int = 200,
         pad_idx: int = 0,
+        length_norm_alpha: float = 0.6,
     ):
         super().__init__()
 
         self.d_model = d_model
         self.pad_idx = pad_idx
         self.max_seq_len = max_seq_len
+        # Length normalization exponent for beam search scores.
+        # Divides accumulated log-prob by length^alpha to prevent the beam
+        # from always preferring shorter sequences.  0.6 is a standard default.
+        self.length_norm_alpha = length_norm_alpha
 
         # Token embedding
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_idx)
@@ -206,10 +211,14 @@ class TransformerDecoder(nn.Module):
         max_len: int = 200,
     ) -> torch.Tensor:
         """
-        Beam search decoding.
+        Beam search decoding with length normalization.
+
+        Scores are normalized by sequence_length ^ alpha before selecting
+        the best completed beam, preventing the decoder from systematically
+        preferring shorter outputs.
 
         Args:
-            memory: [B, S, d_model] encoder output (B should be 1 for beam search)
+            memory: [1, S, d_model] encoder output (batch_size must be 1)
             sos_idx: start-of-sequence token index
             eos_idx: end-of-sequence token index
             beam_size: number of beams
@@ -218,89 +227,99 @@ class TransformerDecoder(nn.Module):
         Returns:
             best_sequence: [1, T] best decoded sequence
         """
-        B = memory.size(0)
         device = memory.device
-        assert B == 1, "Beam search currently supports batch_size=1"
+        assert memory.size(0) == 1, "Beam search supports batch_size=1 only"
 
-        # Expand memory for beam search
-        memory = memory.expand(beam_size, -1, -1)  # [beam, S, d_model]
+        # Expand memory once for all beams — kept fixed throughout decoding
+        # (never sliced), avoiding the alignment bug when beams complete early.
+        memory_expanded = memory.expand(beam_size, -1, -1)  # [beam, S, d_model]
 
-        # Initialize beams: (log_prob, sequence)
+        # sequences[i] holds the current token sequence for beam i
         sequences = torch.full((beam_size, 1), sos_idx, dtype=torch.long, device=device)
+        # Raw accumulated log-probs (unnormalized)
         scores = torch.zeros(beam_size, device=device)
-        scores[1:] = -float('inf')  # Only first beam is active initially
+        scores[1:] = -float('inf')  # Only beam 0 is active at step 0
 
-        completed_beams = []
+        # active_mask: which beam slots are still generating (not yet hit EOS)
+        active_mask = torch.ones(beam_size, dtype=torch.bool, device=device)
+
+        completed_beams: list[tuple[float, torch.Tensor]] = []
 
         for step in range(max_len - 1):
-            tgt_mask = self._generate_causal_mask(sequences.size(1), device)
-            tgt_key_padding_mask = self._generate_padding_mask(sequences)
+            active_indices = active_mask.nonzero(as_tuple=True)[0]
+            n_active = active_indices.size(0)
+            if n_active == 0:
+                break
 
-            x = self.embedding(sequences) * math.sqrt(self.d_model)
+            # Run decoder only on currently active beams
+            seqs_active = sequences[active_indices]           # [n_active, t]
+            mem_active = memory_expanded[:n_active]           # [n_active, S, d]
+
+            t = seqs_active.size(1)
+            tgt_mask = self._generate_causal_mask(t, device)
+            tgt_key_padding_mask = self._generate_padding_mask(seqs_active)
+
+            x = self.embedding(seqs_active) * math.sqrt(self.d_model)
             x = self.pos_encoding(x)
-
             output = self.transformer_decoder(
                 tgt=x,
-                memory=memory,
+                memory=mem_active,
                 tgt_mask=tgt_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
             )
+            logits = self.output_proj(output[:, -1, :])       # [n_active, vocab]
+            log_probs = F.log_softmax(logits, dim=-1)          # [n_active, vocab]
 
-            logits = self.output_proj(output[:, -1, :])  # [beam, vocab]
-            log_probs = F.log_softmax(logits, dim=-1)
-
-            # Calculate new scores
             vocab_size = log_probs.size(-1)
-            next_scores = scores.unsqueeze(-1) + log_probs  # [beam, vocab]
-            next_scores = next_scores.view(-1)  # [beam * vocab]
 
-            # Select top-k
-            topk_scores, topk_indices = next_scores.topk(beam_size)
-            beam_indices = topk_indices // vocab_size
-            token_indices = topk_indices % vocab_size
+            # Expand current scores and add new log_probs
+            cur_scores = scores[active_indices].unsqueeze(-1)  # [n_active, 1]
+            next_scores = cur_scores + log_probs               # [n_active, vocab]
 
-            # Update sequences
-            sequences = torch.cat([
-                sequences[beam_indices],
-                token_indices.unsqueeze(-1)
-            ], dim=1)
-            scores = topk_scores
+            # Flatten and pick top beam_size candidates across all active beams
+            flat = next_scores.view(-1)                        # [n_active * vocab]
+            topk_scores, topk_flat = flat.topk(min(beam_size, flat.size(0)))
 
-            # Check for completed beams
-            eos_mask = token_indices == eos_idx
-            if eos_mask.any():
-                for i in range(beam_size):
-                    if eos_mask[i]:
-                        completed_beams.append((scores[i].item(), sequences[i].clone()))
+            # Map flat indices back to (beam_within_active, token)
+            beam_within_active = topk_flat // vocab_size
+            token_ids = topk_flat % vocab_size
 
-                # Keep non-EOS beams
-                non_eos = ~eos_mask
-                if non_eos.sum() == 0:
-                    break
-                sequences = sequences[non_eos]
-                scores = scores[non_eos]
+            # Reconstruct new sequences for all candidate beams
+            new_sequences = torch.cat([
+                seqs_active[beam_within_active],               # parent sequences
+                token_ids.unsqueeze(-1)                        # new tokens
+            ], dim=1)                                          # [beam_size, t+1]
 
-                # Refill beams if needed
-                if sequences.size(0) < beam_size:
-                    pad_count = beam_size - sequences.size(0)
-                    sequences = torch.cat([
-                        sequences,
-                        sequences[:pad_count].clone()
-                    ], dim=0)
-                    scores = torch.cat([
-                        scores,
-                        torch.full((pad_count,), -float('inf'), device=device)
-                    ], dim=0)
+            # Update global state: place new beams back into fixed-size buffers
+            new_scores = topk_scores
+            filled = new_sequences.size(0)
+            sequences = torch.zeros(beam_size, new_sequences.size(1),
+                                    dtype=torch.long, device=device)
+            sequences[:filled] = new_sequences
+            scores = torch.full((beam_size,), -float('inf'), device=device)
+            scores[:filled] = new_scores
+            active_mask = torch.zeros(beam_size, dtype=torch.bool, device=device)
 
-                memory = memory[:sequences.size(0)]
+            # Handle EOS tokens
+            for i in range(filled):
+                if token_ids[i].item() == eos_idx:
+                    seq_len = new_sequences.size(1)
+                    norm = (seq_len ** self.length_norm_alpha)
+                    completed_beams.append((new_scores[i].item() / norm,
+                                            new_sequences[i].clone()))
+                else:
+                    active_mask[i] = True
 
-        # Add remaining beams
-        for i in range(sequences.size(0)):
-            completed_beams.append((scores[i].item(), sequences[i].clone()))
+        # Add remaining active beams as completed (no EOS found within max_len)
+        for i in range(beam_size):
+            if active_mask[i]:
+                seq_len = sequences[i].size(0)
+                norm = (seq_len ** self.length_norm_alpha)
+                completed_beams.append((scores[i].item() / norm, sequences[i].clone()))
 
         if not completed_beams:
             return sequences[:1]
 
-        # Return best beam
+        # Return the beam with the highest length-normalized score
         best_score, best_seq = max(completed_beams, key=lambda x: x[0])
         return best_seq.unsqueeze(0)

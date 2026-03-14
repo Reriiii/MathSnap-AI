@@ -17,6 +17,8 @@ class HMERModel(nn.Module):
 
     DenseNet encodes the image into feature vectors,
     Transformer decoder generates LaTeX token sequence.
+    A CTC head on the encoder output provides an auxiliary loss signal
+    that helps the encoder learn better spatial alignment independently.
     """
 
     def __init__(
@@ -25,15 +27,16 @@ class HMERModel(nn.Module):
         d_model: int = 256,
         # Encoder params
         enc_growth_rate: int = 24,
-        enc_block_config: tuple = (6, 12, 24, 16),
+        enc_block_config: tuple = (6, 12, 16, 8),
         enc_num_init_features: int = 64,
         enc_bn_size: int = 4,
         enc_drop_rate: float = 0.2,
-        enc_compression: float = 0.5,
+        enc_compression: float = 0.8,
+        enc_num_transitions: int = 2,
         # Decoder params
         dec_nhead: int = 8,
-        dec_num_layers: int = 3,
-        dec_dim_feedforward: int = 1024,
+        dec_num_layers: int = 6,
+        dec_dim_feedforward: int = 2048,
         dec_dropout: float = 0.3,
         max_seq_len: int = 200,
         pad_idx: int = 0,
@@ -49,6 +52,7 @@ class HMERModel(nn.Module):
             drop_rate=enc_drop_rate,
             compression=enc_compression,
             d_model=d_model,
+            num_transitions=enc_num_transitions,
         )
 
         self.decoder = TransformerDecoder(
@@ -62,8 +66,27 @@ class HMERModel(nn.Module):
             pad_idx=pad_idx,
         )
 
+        # CTC auxiliary head: projects encoder features directly to vocab.
+        # Trained with CTCLoss in parallel with the cross-entropy decoder loss.
+        # Encourages the encoder to produce spatially-aligned features without
+        # relying on the decoder's attention to correct misalignment.
+        self.ctc_head = nn.Linear(d_model, vocab_size)
+
         self.pad_idx = pad_idx
         self.d_model = d_model
+
+    def encode(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Run only the encoder. Used by the CTC training branch to avoid
+        a redundant forward pass through the encoder.
+
+        Args:
+            images: [B, 1, H, W] grayscale images
+
+        Returns:
+            memory: [B, S, d_model] encoder feature sequence
+        """
+        return self.encoder(images)
 
     def forward(self, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -163,6 +186,7 @@ def build_model(vocab_size: int, config=None) -> HMERModel:
         enc_bn_size=config.encoder.bn_size,
         enc_drop_rate=config.encoder.drop_rate,
         enc_compression=config.encoder.compression,
+        enc_num_transitions=config.encoder.num_transitions,
         dec_nhead=config.decoder.nhead,
         dec_num_layers=config.decoder.num_layers,
         dec_dim_feedforward=config.decoder.dim_feedforward,

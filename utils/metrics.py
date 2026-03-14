@@ -96,8 +96,14 @@ def compute_bleu(
     """
     import math
 
+    # Always return all keys regardless of input, so history tracking never
+    # gets KeyError from a missing epoch entry.
+    empty = {f'bleu_{i}': 0.0 for i in range(1, max_n + 1)}
+    empty['bleu'] = 0.0
+    empty['brevity_penalty'] = 0.0
+
     if not predictions or not targets:
-        return {f'bleu_{i}': 0.0 for i in range(1, max_n + 1)}
+        return empty
 
     clipped_counts = [0] * max_n
     total_counts = [0] * max_n
@@ -136,11 +142,10 @@ def compute_bleu(
     else:
         bp = math.exp(1 - total_ref_len / total_pred_len)
 
-    # Compute BLEU scores
+    # Compute BLEU-1 through BLEU-max_n
     result = {'brevity_penalty': bp}
 
     for n in range(1, max_n + 1):
-        # BLEU-n: geometric mean of precisions 1..n
         log_avg = 0.0
         valid = True
         for i in range(n):
@@ -155,7 +160,7 @@ def compute_bleu(
         else:
             result[f'bleu_{n}'] = 0.0
 
-    # Main BLEU = BLEU-4
+    # Main BLEU = BLEU-4 (or BLEU-max_n if max_n != 4)
     result['bleu'] = result[f'bleu_{max_n}']
 
     return result

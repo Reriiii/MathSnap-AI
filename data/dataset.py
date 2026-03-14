@@ -130,19 +130,30 @@ class CROHMEDataset(Dataset):
 
         Includes: rotation, affine, perspective, noise, erosion/dilation,
         brightness/contrast variation, and paper texture simulation.
+
+        global_prob in aug_config acts as a curriculum gate: during early
+        training it is set below 1.0 so augmentations are applied less
+        frequently, letting the model first learn from cleaner images.
         """
         cfg = self.aug_config
 
+        # Curriculum gate — scales all per-augmentation probabilities uniformly.
+        # Set to 1.0 (full augmentation) once the model has warmed up.
+        global_prob = cfg.get('global_prob', 1.0)
+
+        def should_apply(base_prob: float) -> bool:
+            return random.random() < base_prob * global_prob
+
         # 1. Random rotation
         rotation_range = cfg.get('rotation_range', 5.0)
-        if random.random() < 0.5:
+        if should_apply(0.5):
             angle = random.uniform(-rotation_range, rotation_range)
             img = img.rotate(angle, fillcolor=255, expand=False)
 
         # 2. Random affine (scale + shear)
         scale_range = cfg.get('scale_range', (0.9, 1.1))
         shear_range = cfg.get('shear_range', 0.1)
-        if random.random() < 0.5:
+        if should_apply(0.5):
             scale = random.uniform(*scale_range)
             shear_x = random.uniform(-shear_range, shear_range)
             shear_y = random.uniform(-shear_range, shear_range)
@@ -157,7 +168,7 @@ class CROHMEDataset(Dataset):
             )
 
         # 3. Random perspective distortion
-        if random.random() < 0.3:
+        if should_apply(0.3):
             img = TF.to_tensor(img)
             img = T.RandomPerspective(distortion_scale=0.1, p=1.0, fill=1.0)(img)
             img = TF.to_pil_image(img)
@@ -165,17 +176,17 @@ class CROHMEDataset(Dataset):
         # 4. Brightness and contrast jitter
         brightness_range = cfg.get('brightness_range', (0.7, 1.3))
         contrast_range = cfg.get('contrast_range', (0.7, 1.3))
-        if random.random() < 0.5:
+        if should_apply(0.5):
             brightness_factor = random.uniform(*brightness_range)
             img = TF.adjust_brightness(img, brightness_factor)
-        if random.random() < 0.5:
+        if should_apply(0.5):
             contrast_factor = random.uniform(*contrast_range)
             img = TF.adjust_contrast(img, contrast_factor)
 
         # 5. Erosion/dilation (stroke thickness variation)
-        erosion_dilation_prob = cfg.get('erosion_dilation_prob', 0.3)
+        erosion_dilation_prob = cfg.get('erosion_dilation_prob', 0.15)
         kernel_size = cfg.get('erosion_dilation_kernel', 2)
-        if random.random() < erosion_dilation_prob:
+        if should_apply(erosion_dilation_prob):
             if random.random() < 0.5:
                 # Dilation (thicker strokes) - using MinFilter
                 img = img.filter(ImageFilter.MinFilter(kernel_size + 1))
@@ -185,21 +196,21 @@ class CROHMEDataset(Dataset):
 
         # 6. Gaussian noise
         noise_std = cfg.get('noise_std', 0.02)
-        if random.random() < 0.4:
+        if should_apply(0.4):
             img_np = np.array(img, dtype=np.float32) / 255.0
             noise = np.random.normal(0, noise_std, img_np.shape)
             img_np = np.clip(img_np + noise, 0, 1)
             img = Image.fromarray((img_np * 255).astype(np.uint8))
 
         # 7. Gaussian blur (simulate slight paper texture / scan blur)
-        if random.random() < 0.2:
+        if should_apply(0.2):
             radius = random.uniform(0.3, 1.0)
             img = img.filter(ImageFilter.GaussianBlur(radius=radius))
 
         # 8. Random elastic deformation
-        elastic_alpha = cfg.get('elastic_alpha', 30.0)
-        elastic_sigma = cfg.get('elastic_sigma', 4.0)
-        if random.random() < 0.3:
+        elastic_alpha = cfg.get('elastic_alpha', 8.0)
+        elastic_sigma = cfg.get('elastic_sigma', 6.0)
+        if should_apply(0.3):
             img = self._elastic_transform(img, elastic_alpha, elastic_sigma)
 
         return img

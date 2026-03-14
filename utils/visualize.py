@@ -32,7 +32,9 @@ def plot_training_curves(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    has_ctc = 'train_ctc_loss' in history and any(v > 0 for v in history.get('train_ctc_loss', []))
+    n_rows = 3 if has_ctc else 2
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 5 * n_rows))
     fig.suptitle('HMER Training Progress', fontsize=16, fontweight='bold')
 
     epochs = range(1, len(history.get('train_loss', [])) + 1)
@@ -57,6 +59,13 @@ def plot_training_curves(
         ax.plot(epochs, history['exprate_1'], 'g--', label='ExpRate@1', alpha=0.7)
     if 'exprate_2' in history:
         ax.plot(epochs, history['exprate_2'], 'g:', label='ExpRate@2', alpha=0.7)
+    # Mark peak ExpRate
+    if 'exprate' in history and history['exprate']:
+        peak_val = max(history['exprate'])
+        peak_ep = history['exprate'].index(peak_val) + 1
+        ax.axvline(peak_ep, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+        ax.annotate(f'Peak {peak_val:.1f}%', xy=(peak_ep, peak_val),
+                    xytext=(5, -15), textcoords='offset points', fontsize=8, color='gray')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('ExpRate (%)')
     ax.set_title('Expression Recognition Rate')
@@ -84,6 +93,28 @@ def plot_training_curves(
     ax.set_title('Learning Rate Schedule')
     ax.grid(True, alpha=0.3)
     ax.ticklabel_format(axis='y', style='scientific', scilimits=(-4, -4))
+
+    # 5. CTC loss (only if present and non-zero)
+    if has_ctc:
+        ax = axes[2, 0]
+        ax.plot(epochs, history['train_ctc_loss'], 'orange', label='CTC Loss', linewidth=2)
+        if 'train_ce_loss' in history:
+            ax.plot(epochs, history['train_ce_loss'], 'b--', label='CE Loss', alpha=0.7, linewidth=1.5)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.set_title('CTC vs CE Loss')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 6. Token accuracy
+        ax = axes[2, 1]
+        if 'token_accuracy' in history:
+            ax.plot(epochs, history['token_accuracy'], 'teal', label='Token Acc', linewidth=2)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Accuracy (%)')
+        ax.set_title('Token Accuracy')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     save_path = os.path.join(output_dir, filename)

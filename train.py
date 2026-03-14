@@ -2,7 +2,10 @@
 Training script for HMER: DenseNet Encoder + Transformer Decoder.
 
 Features:
-- AdamW optimizer with warmup + cosine annealing
+- AdamW optimizer with warmup + cosine annealing with restarts
+- ReduceLROnPlateau secondary scheduler to escape plateaus
+- CTC auxiliary loss on encoder output (weight configurable)
+- Curriculum augmentation: ramp-up aug probability over first N epochs
 - Mixed precision training (AMP)
 - Validation with ExpRate and BLEU metrics
 - Checkpointing (best model by ExpRate)
@@ -50,35 +53,105 @@ def set_seed(seed: int):
 
 
 def get_lr_scheduler(optimizer, config: Config, steps_per_epoch: int, constant_lr: bool = False):
-    """Create warmup + cosine annealing learning rate scheduler."""
+    """
+    Warmup + cosine annealing with decaying restarts and per-restart mini warmup.
+
+    Structure per cycle after the initial warmup:
+      - lr_restart_warmup_epochs: LR ramps 0 → cycle_peak (smooth re-entry)
+      - remaining cycle steps:    LR cosines from cycle_peak → min_lr
+
+    cycle_peak decays geometrically each restart:
+      cycle 0: peak = lr_max         (2e-4)
+      cycle 1: peak = lr_max × 0.3  (6e-5) — safe for fine-tuning
+      cycle 2: peak = lr_max × 0.09 (1.8e-5)
+
+    Run 3 post-mortem: decay=0.5 → cycle-2 peak=1e-4 still caused ep56 drop
+    of 5pp. Decay=0.3 keeps the restart below the overshoot threshold while
+    still providing enough gradient signal to escape shallow plateaus.
+    """
     if constant_lr:
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
 
-    warmup_steps = config.train.warmup_epochs * steps_per_epoch
-    total_steps = config.train.epochs * steps_per_epoch
+    warmup_steps         = config.train.warmup_epochs * steps_per_epoch
+    T_cycle              = config.train.lr_cycle_epochs * steps_per_epoch
+    restart_warmup_steps = config.train.lr_restart_warmup_epochs * steps_per_epoch
+    decay                = config.train.lr_restart_decay
+    min_ratio            = config.train.min_lr / config.train.lr
 
     def lr_lambda(step):
         if step < warmup_steps:
             return step / max(warmup_steps, 1)
-        else:
-            progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
-            return max(
-                config.train.min_lr / config.train.lr,
-                0.5 * (1 + np.cos(np.pi * progress))
-            )
+
+        post_warmup  = step - warmup_steps
+        cycle_idx    = post_warmup // T_cycle
+        cycle_step   = post_warmup % T_cycle
+        peak_ratio   = decay ** cycle_idx   # shrinks each restart
+
+        # Mini warmup at the start of each restart cycle (cycle 1, 2, ...)
+        # Prevents the LR from jumping immediately to the cycle peak.
+        if cycle_idx > 0 and cycle_step < restart_warmup_steps:
+            ramp = cycle_step / max(restart_warmup_steps, 1)
+            return max(min_ratio, peak_ratio * ramp)
+
+        # Cosine decay for the remainder of the cycle
+        offset            = restart_warmup_steps if cycle_idx > 0 else 0
+        effective_step    = cycle_step - offset
+        effective_dur     = T_cycle    - offset
+        progress          = effective_step / max(effective_dur, 1)
+        cosine_val        = 0.5 * (1 + np.cos(np.pi * progress))
+        return max(min_ratio, peak_ratio * cosine_val)
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _calibrate_bn(model: nn.Module, dataloader, device: str, num_batches: int = 30):
+    """
+    Recalibrate BatchNorm running statistics before validation.
+
+    During curriculum augmentation the training data distribution shifts
+    gradually as aug_prob increases. BN running_mean/var track the augmented
+    training distribution; when the model switches to eval() for validation
+    (which uses clean, unaugmented images) the mismatch can cause a complete
+    decoding failure for one epoch.
+
+    This function forwards a small number of training batches through the
+    encoder in train() mode (no gradient accumulation, no optimizer update)
+    so that the running stats reflect the current epoch's distribution before
+    validation begins.  30 batches is enough for momentum=0.1 to converge.
+    """
+    model.train()
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            if i >= num_batches:
+                break
+            model.encoder(batch['image'].to(device))
+
+
 def train_one_epoch(
-    model, dataloader, optimizer, scheduler, criterion, scaler, config, epoch
+    model, dataloader, optimizer, scheduler, criterion, ctc_criterion,
+    scaler, config, epoch, pad_idx
 ):
-    """Train for one epoch."""
+    """
+    Train for one epoch.
+
+    CTC weight is ramped from 0 → ctc_weight over ctc_warmup_epochs to
+    prevent the large initial CTC loss (≈38 on a random encoder) from
+    dominating gradients before the encoder has learned anything useful.
+    """
     model.train()
     total_loss = 0
+    total_ce_loss = 0
+    total_ctc_loss = 0
     num_batches = 0
 
+    # Ramp CTC weight: 0 at epoch 1, full weight at epoch ctc_warmup_epochs+1
+    if config.train.ctc_weight > 0 and config.train.ctc_warmup_epochs > 0:
+        ctc_w = config.train.ctc_weight * min(1.0, epoch / config.train.ctc_warmup_epochs)
+    else:
+        ctc_w = config.train.ctc_weight
+
     pbar = tqdm(dataloader, desc=f"Train Epoch {epoch}", leave=False)
+    use_ctc = ctc_w > 0 and ctc_criterion is not None
 
     for batch_idx, batch in enumerate(pbar):
         images = batch['image'].to(config.device)
@@ -88,14 +161,30 @@ def train_one_epoch(
 
         if config.train.use_amp and config.device == 'cuda':
             with autocast('cuda'):
+                # --- Cross-entropy loss (teacher forcing) ---
                 logits = model(images, targets)
-                # Target for loss: shift left (remove SOS, keep EOS)
-                tgt_out = targets[:, 1:]  # [B, T-1]
-                logits = logits[:, :tgt_out.size(1), :]  # Align lengths
-                loss = criterion(
+                tgt_out = targets[:, 1:]  # [B, T-1]: remove SOS, keep EOS
+                logits = logits[:, :tgt_out.size(1), :]
+                ce_loss = criterion(
                     logits.reshape(-1, logits.size(-1)),
                     tgt_out.reshape(-1)
                 )
+
+                # --- CTC auxiliary loss on encoder output ---
+                if use_ctc:
+                    memory = model.encode(images)           # [B, S, d_model]
+                    ctc_logits = model.ctc_head(memory)     # [B, S, vocab]
+                    ctc_log_probs = ctc_logits.log_softmax(-1).permute(1, 0, 2)  # [S, B, vocab]
+                    B, S = images.size(0), ctc_log_probs.size(0)
+                    input_lengths = torch.full((B,), S, dtype=torch.long, device=images.device)
+                    # Targets for CTC: strip SOS (index 0), keep content + EOS
+                    tgt_ctc = targets[:, 1:]
+                    target_lengths = (tgt_ctc != pad_idx).sum(dim=1).clamp(min=1)
+                    ctc_loss = ctc_criterion(ctc_log_probs, tgt_ctc, input_lengths, target_lengths)
+                    loss = ce_loss + ctc_w * ctc_loss
+                else:
+                    ctc_loss = torch.tensor(0.0)
+                    loss = ce_loss
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -106,10 +195,25 @@ def train_one_epoch(
             logits = model(images, targets)
             tgt_out = targets[:, 1:]
             logits = logits[:, :tgt_out.size(1), :]
-            loss = criterion(
+            ce_loss = criterion(
                 logits.reshape(-1, logits.size(-1)),
                 tgt_out.reshape(-1)
             )
+
+            if use_ctc:
+                memory = model.encode(images)
+                ctc_logits = model.ctc_head(memory)
+                ctc_log_probs = ctc_logits.log_softmax(-1).permute(1, 0, 2)
+                B, S = images.size(0), ctc_log_probs.size(0)
+                input_lengths = torch.full((B,), S, dtype=torch.long, device=images.device)
+                tgt_ctc = targets[:, 1:]
+                target_lengths = (tgt_ctc != pad_idx).sum(dim=1).clamp(min=1)
+                ctc_loss = ctc_criterion(ctc_log_probs, tgt_ctc, input_lengths, target_lengths)
+                loss = ce_loss + ctc_w * ctc_loss
+            else:
+                ctc_loss = torch.tensor(0.0)
+                loss = ce_loss
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip)
             optimizer.step()
@@ -117,15 +221,21 @@ def train_one_epoch(
         scheduler.step()
 
         total_loss += loss.item()
+        total_ce_loss += ce_loss.item()
+        total_ctc_loss += ctc_loss.item()
         num_batches += 1
 
         if batch_idx % config.train.log_interval == 0:
-            pbar.set_postfix({
+            postfix = {
                 'loss': f'{loss.item():.4f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.2e}'
-            })
+                'lr': f'{scheduler.get_last_lr()[0]:.2e}',
+            }
+            if use_ctc:
+                postfix['ctc'] = f'{ctc_loss.item():.3f}'
+            pbar.set_postfix(postfix)
 
-    return total_loss / max(num_batches, 1)
+    n = max(num_batches, 1)
+    return total_loss / n, total_ce_loss / n, total_ctc_loss / n
 
 
 @torch.no_grad()
@@ -293,6 +403,10 @@ def main():
         label_smoothing=config.train.label_smoothing,
     )
 
+    # CTC auxiliary loss — zero_infinity=True avoids NaN on very long sequences
+    ctc_criterion = nn.CTCLoss(blank=vocab.pad_idx, zero_infinity=True) \
+        if config.train.ctc_weight > 0 else None
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.train.lr,
@@ -304,13 +418,25 @@ def main():
         optimizer, config, steps_per_epoch,
         constant_lr=args.overfit_test  # Constant LR for overfitting test
     )
+
+    # Secondary scheduler: halves LR when ExpRate stops improving for patience//3
+    # epochs. Works on top of the cosine restarts to escape deep plateaus.
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='max',
+        factor=0.5,
+        patience=config.train.patience // 3,
+        min_lr=config.train.min_lr
+    ) if not args.overfit_test else None
+
     scaler = GradScaler('cuda', enabled=config.train.use_amp and config.device == 'cuda')
 
     # Resume from checkpoint
     start_epoch = 1
     best_exprate = 0.0
     history = {
-        'train_loss': [], 'val_loss': [],
+        'train_loss': [], 'train_ce_loss': [], 'train_ctc_loss': [],
+        'val_loss': [],
         'exprate': [], 'exprate_1': [], 'exprate_2': [],
         'bleu': [], 'bleu_1': [], 'bleu_4': [],
         'token_accuracy': [],
@@ -333,14 +459,49 @@ def main():
     print("=" * 60)
 
     epochs_without_improvement = 0
+    # Track LR restart epochs to exempt them from early stopping.
+    # A cosine restart causes a transient regression (run 3: ep56 dropped 5pp)
+    # that is NOT a genuine plateau — it is a known side-effect of the LR jump.
+    # Penalising these epochs causes premature stopping before the model can
+    # recover from the restart and continue improving.
+    prev_epoch_end_lr = None
+    restart_grace_remaining = 0   # grace epochs left after detecting a restart
 
     for epoch in range(start_epoch, config.train.epochs + 1):
         epoch_start = time.time()
 
+        # --- Curriculum augmentation ---
+        # Ramp aug probability from 0 → 1 over aug_warmup_epochs.
+        # This lets the model learn clean patterns first before seeing
+        # heavily distorted training images.
+        if not args.overfit_test and config.data.augment and config.train.aug_warmup_epochs > 0:
+            aug_prob = min(1.0, epoch / config.train.aug_warmup_epochs)
+            train_loader.dataset.aug_config['global_prob'] = aug_prob
+        else:
+            aug_prob = 1.0
+
         # Train
-        train_loss = train_one_epoch(
-            model, train_loader, optimizer, scheduler, criterion, scaler, config, epoch
+        train_loss, train_ce_loss, train_ctc_loss = train_one_epoch(
+            model, train_loader, optimizer, scheduler, criterion, ctc_criterion,
+            scaler, config, epoch, vocab.pad_idx
         )
+
+        # --- BN calibration before validation ---
+        # During aug warmup, training data distribution shifts each epoch as
+        # aug_prob increases. BN running stats track the augmented-train
+        # distribution and diverge from clean validation images, causing
+        # single-epoch exprate spikes (ep17: 17%→1.3%, ep21: 19%→2.6%).
+        # Fix: forward unaugmented batches through encoder in train() mode
+        # to re-sync running stats before eval.
+        #
+        # Run 3 post-mortem: spike at ep31 (+0.12 val_loss, -4.7pp exprate)
+        # because aug_prob=1.0 exactly at ep30 → calibration stopped.
+        # ep31 = first epoch with FULL augmentation but BN stats from ep30
+        # partial aug. Extend window 2 epochs past ramp completion to cover
+        # the transition from partial → full augmentation.
+        calibrate_window = config.train.aug_warmup_epochs + 2
+        if config.data.augment and epoch <= calibrate_window:
+            _calibrate_bn(model, train_loader, config.device, num_batches=30)
 
         # Validate
         val_metrics, val_preds, val_targets, val_images, val_paths = validate(
@@ -349,8 +510,14 @@ def main():
 
         epoch_time = time.time() - epoch_start
 
+        # Step plateau scheduler based on val ExpRate
+        if plateau_scheduler is not None:
+            plateau_scheduler.step(val_metrics['exprate'])
+
         # Record history
         history['train_loss'].append(train_loss)
+        history['train_ce_loss'].append(train_ce_loss)
+        history['train_ctc_loss'].append(train_ctc_loss)
         history['val_loss'].append(val_metrics['val_loss'])
         history['exprate'].append(val_metrics['exprate'])
         history['exprate_1'].append(val_metrics['exprate_1'])
@@ -362,15 +529,24 @@ def main():
         history['lr'].append(scheduler.get_last_lr()[0])
 
         # Print epoch summary
+        # Recompute ctc_w here (mirrors the ramp logic inside train_one_epoch)
+        # so the printed weight matches what was actually used this epoch.
+        if config.train.ctc_weight > 0 and config.train.ctc_warmup_epochs > 0:
+            ctc_w = config.train.ctc_weight * min(1.0, epoch / config.train.ctc_warmup_epochs)
+        else:
+            ctc_w = config.train.ctc_weight
+        ctc_str = f"\n  CTC Loss:   {train_ctc_loss:.4f} (weight={ctc_w:.3f})" if config.train.ctc_weight > 0 else ""
+        aug_str = f"\n  Aug prob:   {aug_prob:.2f}" if config.data.augment else ""
         print(
             f"\nEpoch {epoch}/{config.train.epochs} ({epoch_time:.1f}s)"
-            f"\n  Train Loss: {train_loss:.4f}"
+            f"\n  Train Loss: {train_loss:.4f} (CE: {train_ce_loss:.4f}{ctc_str})"
             f"\n  Val Loss:   {val_metrics['val_loss']:.4f}"
             f"\n  ExpRate:    {val_metrics['exprate']:.2f}% "
             f"(±1: {val_metrics['exprate_1']:.2f}%, ±2: {val_metrics['exprate_2']:.2f}%)"
             f"\n  BLEU-4:     {val_metrics['bleu']:.2f}%"
             f"\n  Token Acc:  {val_metrics['token_accuracy']:.2f}%"
             f"\n  LR:         {scheduler.get_last_lr()[0]:.2e}"
+            f"{aug_str}"
         )
 
         # Print some sample predictions
@@ -381,11 +557,31 @@ def main():
             print(f"    {match} GT:   {val_targets[i][:60]}")
             print(f"      Pred: {val_preds[i][:60]}")
 
+        # --- Detect LR restart and apply grace period ---
+        # A cosine restart causes a transient regression before the model
+        # recovers (run 3 ep56: -5.3pp). Penalising with the patience counter
+        # causes premature early stopping before recovery is complete.
+        # Detection: LR only increases between epochs at a cycle boundary.
+        current_lr = scheduler.get_last_lr()[0]
+        is_restart_epoch = (
+            prev_epoch_end_lr is not None and current_lr > prev_epoch_end_lr * 1.5
+        )
+        if is_restart_epoch:
+            restart_grace_remaining = config.train.lr_restart_warmup_epochs + 3
+            print(f"  \u21ba LR restart detected ({prev_epoch_end_lr:.2e} \u2192 {current_lr:.2e}). "
+                  f"Grace period: {restart_grace_remaining} epochs")
+        prev_epoch_end_lr = current_lr
+        if restart_grace_remaining > 0:
+            restart_grace_remaining -= 1
+
         # Checkpointing
         is_best = val_metrics['exprate'] > best_exprate
         if is_best:
             best_exprate = val_metrics['exprate']
             epochs_without_improvement = 0
+        elif restart_grace_remaining > 0:
+            # Within grace period: transient restart regression, don't penalise
+            pass
         else:
             epochs_without_improvement += 1
 

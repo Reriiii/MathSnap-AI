@@ -35,9 +35,10 @@ class DataConfig:
     brightness_range: Tuple[float, float] = (0.7, 1.3)
     contrast_range: Tuple[float, float] = (0.7, 1.3)
     noise_std: float = 0.02
-    elastic_alpha: float = 30.0
-    elastic_sigma: float = 4.0
-    erosion_dilation_prob: float = 0.3
+    # Reduced elastic deformation: large alpha distorts math symbols (∑→∫)
+    elastic_alpha: float = 8.0
+    elastic_sigma: float = 6.0        # Smoother deformation
+    erosion_dilation_prob: float = 0.15  # Halved: thick strokes break thin symbols
     erosion_dilation_kernel: int = 2
 
 
@@ -45,12 +46,18 @@ class DataConfig:
 class EncoderConfig:
     """DenseNet encoder configuration."""
     in_channels: int = 1
-    growth_rate: int = 32
-    block_config: Tuple[int, ...] = (6, 12, 24, 16)  # DenseNet-121 style
+    # Reduced growth_rate: fewer channels per layer → spatial downsampling is less aggressive
+    growth_rate: int = 24
+    # Lighter block config: fewer layers in blocks 3 & 4 → preserves spatial resolution
+    block_config: Tuple[int, ...] = (6, 12, 16, 8)
     num_init_features: int = 64
     bn_size: int = 4
     drop_rate: float = 0.2
-    compression: float = 0.5
+    # Higher compression: keeps more features through transition layers (was 0.5)
+    compression: float = 0.8
+    # 2 transitions → 256 encoder tokens (8×32) for 128×512 input.
+    # 3 transitions (original) → only 64 tokens (4×16), too sparse for long expressions.
+    num_transitions: int = 2
 
 
 @dataclass
@@ -71,8 +78,13 @@ class TrainConfig:
     lr: float = 2e-4
     min_lr: float = 1e-7
     weight_decay: float = 1e-4
-    warmup_epochs: int = 10
+    # Reduced warmup: decay starts sooner so LR reaches min_lr before early stopping
+    warmup_epochs: int = 5
     label_smoothing: float = 0.1
+
+    # Cosine annealing cycle length in epochs (with restarts).
+    # Shorter than total epochs so each cycle completes fully even with early stopping.
+    lr_cycle_epochs: int = 50
 
     # Gradient clipping
     grad_clip: float = 5.0
@@ -80,8 +92,32 @@ class TrainConfig:
     # Mixed precision
     use_amp: bool = True
 
-    # Early stopping
-    patience: int = 20
+    # Early stopping — increased to give time after LR restarts
+    patience: int = 30
+
+    # CTC auxiliary loss weight (0 to disable).
+    ctc_weight: float = 0.1
+    # Ramp CTC weight from 0 → ctc_weight over this many epochs.
+    # A random encoder produces CTC ≈ 55 at ep1. With ctc_warmup=10,
+    # weight=0.01 → eff_ctc=0.55 which is 9% of CE=6.2 — still noisy.
+    # With ctc_warmup=25, weight=0.004 → eff_ctc=0.22 (3.6% of CE).
+    ctc_warmup_epochs: int = 25
+
+    # Curriculum augmentation: ramp aug probability from 0→1 over this many epochs.
+    # Prevents the model from seeing heavily distorted images before it learns basics.
+    aug_warmup_epochs: int = 30
+
+    # LR restart decay: multiply lr_max by this factor on each cosine cycle restart.
+    # Run 2: decay=0.5 → cycle-2 peak=1e-4. Still overshoots: ep56 exprate -5pp.
+    # Run 3: decay=0.5 still overshoots at ep56 (23.3% from 28.6%).
+    # 0.3 → cycle-2 peak=6e-5, safe for fine-tuning without losing progress.
+    lr_restart_decay: float = 0.3
+
+    # Mini warmup steps within each cosine restart (in epochs).
+    # Without this, the LR jumps immediately to the cycle peak on the first
+    # batch after a restart, causing a gradient spike that overshoots the
+    # current minimum. A 2-epoch ramp smooths the re-entry.
+    lr_restart_warmup_epochs: int = 2
 
     # Checkpointing
     checkpoint_dir: str = "checkpoints"
