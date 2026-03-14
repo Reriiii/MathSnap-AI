@@ -4,7 +4,8 @@
       "Bash(git ls-tree:*)",
       "Bash(git log:*)",
       "Bash(grep -E '\\\\.\\(py|json|yaml|md|sh\\)$')",
-      "Bash(grep -E '\\\\.py$')"
+      "Bash(grep -E '\\\\.py$')",
+      "Bash(git merge:*)"
     ]
   }
 }

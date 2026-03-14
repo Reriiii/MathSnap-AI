@@ -25,6 +25,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
@@ -175,21 +176,25 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         def compute_losses():
-            # model.forward now returns (logits, counts)
-            logits, counts = model(images, targets)
-            tgt_out = targets[:, 1:]           # remove SOS
+            # Encode once, reuse for all heads
+            memory, feat_h, feat_w = model.encode(images)
+
+            # Decoder forward (teacher forcing)
+            tgt_input = targets[:, :-1]
+            logits = model.decoder(tgt_input, memory, feat_h, feat_w)
+            tgt_out = targets[:, 1:]
             logits  = logits[:, :tgt_out.size(1), :]
             ce = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
 
             # Counting loss: binary cross-entropy over vocab presence
             cnt = torch.zeros(1, device=images.device)
             if use_counting:
+                counts = model.counting_module(memory)
                 cnt = F.binary_cross_entropy(counts, count_targets)
 
-            # CTC on encoder output (uses cached memory from encode())
+            # CTC on encoder output (reuses memory from above)
             ctc = torch.zeros(1, device=images.device)
             if use_ctc:
-                memory, feat_h, feat_w = model.encode(images)
                 S = memory.size(1)
                 ctc_log_probs = model.ctc_head(memory).log_softmax(-1).permute(1, 0, 2)
                 in_lens  = torch.full((B,), S, dtype=torch.long, device=images.device)
