@@ -37,16 +37,20 @@ class CROHMEDataset(Dataset):
         max_seq_len: int = 200,
         augment: bool = False,
         aug_config: dict = None,
+        scale_heights: tuple = (),
     ):
         """
         Args:
-            csv_path: path to processed CSV file with (image_path, latex) columns
-            vocab: Vocab instance for encoding labels
-            img_height: target image height
+            csv_path:      path to processed CSV file with (image_path, latex) columns
+            vocab:         Vocab instance for encoding labels
+            img_height:    target image height (baseline; overridden by scale_heights)
             img_max_width: maximum image width (pad/crop to this)
-            max_seq_len: maximum label sequence length
-            augment: whether to apply augmentation
-            aug_config: augmentation parameters dict
+            max_seq_len:   maximum label sequence length
+            augment:       whether to apply augmentation
+            aug_config:    augmentation parameters dict
+            scale_heights: if non-empty and augment=True, randomly sample the
+                           resize height from this tuple each sample (Li et al. 2020
+                           scale augmentation). img_height is used when not augmenting.
         """
         self.vocab = vocab
         self.img_height = img_height
@@ -54,6 +58,7 @@ class CROHMEDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.augment = augment
         self.aug_config = aug_config or {}
+        self.scale_heights = scale_heights
 
         # Load data entries
         self.entries = []
@@ -104,21 +109,31 @@ class CROHMEDataset(Dataset):
         }
 
     def _resize_and_pad(self, img: Image.Image) -> Image.Image:
-        """Resize image to target height maintaining aspect ratio, then pad width."""
-        w, h = img.size
-        # Calculate new width maintaining aspect ratio
-        new_h = self.img_height
-        new_w = int(w * (new_h / h))
+        """
+        Resize image to target height maintaining aspect ratio, then pad width.
 
-        # Cap width
+        Scale augmentation (Li et al. ICFHR 2020): during training, randomly
+        sample the target height from scale_heights instead of always using
+        img_height. This exposes the model to the same expression at multiple
+        scales, improving robustness to subscript/superscript size variation.
+        """
+        w, h = img.size
+
+        # Choose target height
+        if self.augment and self.scale_heights:
+            target_h = random.choice(self.scale_heights)
+        else:
+            target_h = self.img_height
+
+        new_w = int(w * (target_h / h))
         if new_w > self.img_max_width:
             new_w = self.img_max_width
 
-        img = img.resize((new_w, new_h), Image.BILINEAR)
+        img = img.resize((new_w, target_h), Image.BILINEAR)
 
         # Pad to max width (right padding with white)
         if new_w < self.img_max_width:
-            padded = Image.new('L', (self.img_max_width, new_h), 255)
+            padded = Image.new('L', (self.img_max_width, target_h), 255)
             padded.paste(img, (0, 0))
             img = padded
 
@@ -312,6 +327,7 @@ def get_dataloader(
         max_seq_len=config.data.max_seq_len,
         augment=(split == 'train' and config.data.augment),
         aug_config=aug_config,
+        scale_heights=tuple(config.train.scale_heights) if (split == 'train' and config.data.augment) else (),
     )
 
     return DataLoader(

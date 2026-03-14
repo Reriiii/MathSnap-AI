@@ -129,113 +129,109 @@ def _calibrate_bn(model: nn.Module, dataloader, device: str, num_batches: int = 
 
 def train_one_epoch(
     model, dataloader, optimizer, scheduler, criterion, ctc_criterion,
-    scaler, config, epoch, pad_idx
+    scaler, config, epoch, pad_idx, vocab_size
 ):
     """
     Train for one epoch.
 
-    CTC weight is ramped from 0 → ctc_weight over ctc_warmup_epochs to
-    prevent the large initial CTC loss (≈38 on a random encoder) from
-    dominating gradients before the encoder has learned anything useful.
+    Loss = CE  +  ctc_w * CTC  +  counting_w * CountingBCE
+
+    CTC weight is ramped from 0 → ctc_weight over ctc_warmup_epochs.
+    Counting loss is binary-CE: model predicts which vocab tokens are
+    present in the target sequence (weakly supervised, no location needed).
     """
     model.train()
     total_loss = 0
     total_ce_loss = 0
     total_ctc_loss = 0
+    total_cnt_loss = 0
     num_batches = 0
 
-    # Ramp CTC weight: 0 at epoch 1, full weight at epoch ctc_warmup_epochs+1
+    # Ramp CTC weight: 0 at epoch 1 → full at epoch ctc_warmup_epochs+1
     if config.train.ctc_weight > 0 and config.train.ctc_warmup_epochs > 0:
         ctc_w = config.train.ctc_weight * min(1.0, epoch / config.train.ctc_warmup_epochs)
     else:
         ctc_w = config.train.ctc_weight
 
+    counting_w = config.train.counting_weight
+
     pbar = tqdm(dataloader, desc=f"Train Epoch {epoch}", leave=False)
-    use_ctc = ctc_w > 0 and ctc_criterion is not None
+    use_ctc      = ctc_w > 0 and ctc_criterion is not None
+    use_counting = counting_w > 0
 
     for batch_idx, batch in enumerate(pbar):
-        images = batch['image'].to(config.device)
+        images  = batch['image'].to(config.device)
         targets = batch['target'].to(config.device)
+        B       = images.size(0)
+
+        # Build counting targets: 1 if token appears in this sample's sequence
+        if use_counting:
+            count_targets = torch.zeros(B, vocab_size, device=images.device)
+            for i in range(B):
+                present = targets[i].unique()
+                present = present[present != pad_idx]
+                count_targets[i, present] = 1.0
 
         optimizer.zero_grad()
 
+        def compute_losses():
+            # model.forward now returns (logits, counts)
+            logits, counts = model(images, targets)
+            tgt_out = targets[:, 1:]           # remove SOS
+            logits  = logits[:, :tgt_out.size(1), :]
+            ce = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
+
+            # Counting loss: binary cross-entropy over vocab presence
+            cnt = torch.zeros(1, device=images.device)
+            if use_counting:
+                cnt = F.binary_cross_entropy(counts, count_targets)
+
+            # CTC on encoder output (uses cached memory from encode())
+            ctc = torch.zeros(1, device=images.device)
+            if use_ctc:
+                memory, feat_h, feat_w = model.encode(images)
+                S = memory.size(1)
+                ctc_log_probs = model.ctc_head(memory).log_softmax(-1).permute(1, 0, 2)
+                in_lens  = torch.full((B,), S, dtype=torch.long, device=images.device)
+                tgt_ctc  = targets[:, 1:]
+                tgt_lens = (tgt_ctc != pad_idx).sum(dim=1).clamp(min=1)
+                ctc = ctc_criterion(ctc_log_probs, tgt_ctc, in_lens, tgt_lens)
+
+            total = ce + ctc_w * ctc + counting_w * cnt
+            return total, ce, ctc, cnt
+
         if config.train.use_amp and config.device == 'cuda':
             with autocast('cuda'):
-                # --- Cross-entropy loss (teacher forcing) ---
-                logits = model(images, targets)
-                tgt_out = targets[:, 1:]  # [B, T-1]: remove SOS, keep EOS
-                logits = logits[:, :tgt_out.size(1), :]
-                ce_loss = criterion(
-                    logits.reshape(-1, logits.size(-1)),
-                    tgt_out.reshape(-1)
-                )
-
-                # --- CTC auxiliary loss on encoder output ---
-                if use_ctc:
-                    memory = model.encode(images)           # [B, S, d_model]
-                    ctc_logits = model.ctc_head(memory)     # [B, S, vocab]
-                    ctc_log_probs = ctc_logits.log_softmax(-1).permute(1, 0, 2)  # [S, B, vocab]
-                    B, S = images.size(0), ctc_log_probs.size(0)
-                    input_lengths = torch.full((B,), S, dtype=torch.long, device=images.device)
-                    # Targets for CTC: strip SOS (index 0), keep content + EOS
-                    tgt_ctc = targets[:, 1:]
-                    target_lengths = (tgt_ctc != pad_idx).sum(dim=1).clamp(min=1)
-                    ctc_loss = ctc_criterion(ctc_log_probs, tgt_ctc, input_lengths, target_lengths)
-                    loss = ce_loss + ctc_w * ctc_loss
-                else:
-                    ctc_loss = torch.tensor(0.0)
-                    loss = ce_loss
-
+                loss, ce_loss, ctc_loss, cnt_loss = compute_losses()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
-            logits = model(images, targets)
-            tgt_out = targets[:, 1:]
-            logits = logits[:, :tgt_out.size(1), :]
-            ce_loss = criterion(
-                logits.reshape(-1, logits.size(-1)),
-                tgt_out.reshape(-1)
-            )
-
-            if use_ctc:
-                memory = model.encode(images)
-                ctc_logits = model.ctc_head(memory)
-                ctc_log_probs = ctc_logits.log_softmax(-1).permute(1, 0, 2)
-                B, S = images.size(0), ctc_log_probs.size(0)
-                input_lengths = torch.full((B,), S, dtype=torch.long, device=images.device)
-                tgt_ctc = targets[:, 1:]
-                target_lengths = (tgt_ctc != pad_idx).sum(dim=1).clamp(min=1)
-                ctc_loss = ctc_criterion(ctc_log_probs, tgt_ctc, input_lengths, target_lengths)
-                loss = ce_loss + ctc_w * ctc_loss
-            else:
-                ctc_loss = torch.tensor(0.0)
-                loss = ce_loss
-
+            loss, ce_loss, ctc_loss, cnt_loss = compute_losses()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip)
             optimizer.step()
 
         scheduler.step()
 
-        total_loss += loss.item()
-        total_ce_loss += ce_loss.item()
+        total_loss     += loss.item()
+        total_ce_loss  += ce_loss.item()
         total_ctc_loss += ctc_loss.item()
-        num_batches += 1
+        total_cnt_loss += cnt_loss.item()
+        num_batches    += 1
 
         if batch_idx % config.train.log_interval == 0:
-            postfix = {
-                'loss': f'{loss.item():.4f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.2e}',
-            }
+            postfix = {'loss': f'{loss.item():.4f}', 'lr': f'{scheduler.get_last_lr()[0]:.2e}'}
             if use_ctc:
                 postfix['ctc'] = f'{ctc_loss.item():.3f}'
+            if use_counting:
+                postfix['cnt'] = f'{cnt_loss.item():.3f}'
             pbar.set_postfix(postfix)
 
     n = max(num_batches, 1)
-    return total_loss / n, total_ce_loss / n, total_ctc_loss / n
+    return total_loss / n, total_ce_loss / n, total_ctc_loss / n, total_cnt_loss / n
 
 
 @torch.no_grad()
@@ -253,14 +249,11 @@ def validate(model, dataloader, vocab, criterion, config):
         images = batch['image'].to(config.device)
         targets = batch['target'].to(config.device)
 
-        # Compute loss
-        logits = model(images, targets)
-        tgt_out = targets[:, 1:]
-        logits = logits[:, :tgt_out.size(1), :]
-        loss = criterion(
-            logits.reshape(-1, logits.size(-1)),
-            tgt_out.reshape(-1)
-        )
+        # Compute validation loss (CE only — no aux losses during validation)
+        logits, _ = model(images, targets)
+        tgt_out   = targets[:, 1:]
+        logits    = logits[:, :tgt_out.size(1), :]
+        loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
         total_loss += loss.item()
         num_batches += 1
 
@@ -381,6 +374,8 @@ def main():
         config.train.lr = 5e-4              # Higher LR for fast convergence
         config.encoder.drop_rate = 0.0      # No dropout in encoder
         config.decoder.dropout = 0.0        # No dropout in decoder
+        config.train.ctc_weight = 0.0       # No aux losses
+        config.train.counting_weight = 0.0
 
         train_loader = get_dataloader('train', vocab, config, shuffle=False)
         # Limit to num_samples
@@ -435,7 +430,7 @@ def main():
     start_epoch = 1
     best_exprate = 0.0
     history = {
-        'train_loss': [], 'train_ce_loss': [], 'train_ctc_loss': [],
+        'train_loss': [], 'train_ce_loss': [], 'train_ctc_loss': [], 'train_cnt_loss': [],
         'val_loss': [],
         'exprate': [], 'exprate_1': [], 'exprate_2': [],
         'bleu': [], 'bleu_1': [], 'bleu_4': [],
@@ -481,9 +476,9 @@ def main():
             aug_prob = 1.0
 
         # Train
-        train_loss, train_ce_loss, train_ctc_loss = train_one_epoch(
+        train_loss, train_ce_loss, train_ctc_loss, train_cnt_loss = train_one_epoch(
             model, train_loader, optimizer, scheduler, criterion, ctc_criterion,
-            scaler, config, epoch, vocab.pad_idx
+            scaler, config, epoch, vocab.pad_idx, len(vocab)
         )
 
         # --- BN calibration before validation ---
@@ -518,6 +513,7 @@ def main():
         history['train_loss'].append(train_loss)
         history['train_ce_loss'].append(train_ce_loss)
         history['train_ctc_loss'].append(train_ctc_loss)
+        history['train_cnt_loss'].append(train_cnt_loss)
         history['val_loss'].append(val_metrics['val_loss'])
         history['exprate'].append(val_metrics['exprate'])
         history['exprate_1'].append(val_metrics['exprate_1'])
@@ -536,10 +532,11 @@ def main():
         else:
             ctc_w = config.train.ctc_weight
         ctc_str = f"\n  CTC Loss:   {train_ctc_loss:.4f} (weight={ctc_w:.3f})" if config.train.ctc_weight > 0 else ""
+        cnt_str = f"\n  Count Loss: {train_cnt_loss:.4f}" if config.train.counting_weight > 0 else ""
         aug_str = f"\n  Aug prob:   {aug_prob:.2f}" if config.data.augment else ""
         print(
             f"\nEpoch {epoch}/{config.train.epochs} ({epoch_time:.1f}s)"
-            f"\n  Train Loss: {train_loss:.4f} (CE: {train_ce_loss:.4f}{ctc_str})"
+            f"\n  Train Loss: {train_loss:.4f} (CE: {train_ce_loss:.4f}{ctc_str}{cnt_str})"
             f"\n  Val Loss:   {val_metrics['val_loss']:.4f}"
             f"\n  ExpRate:    {val_metrics['exprate']:.2f}% "
             f"(±1: {val_metrics['exprate_1']:.2f}%, ±2: {val_metrics['exprate_2']:.2f}%)"

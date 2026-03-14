@@ -62,13 +62,18 @@ class EncoderConfig:
 
 @dataclass
 class DecoderConfig:
-    """Transformer decoder configuration."""
+    """CoMER Transformer decoder configuration."""
     d_model: int = 512
     nhead: int = 8
     num_layers: int = 6
     dim_feedforward: int = 2048
     dropout: float = 0.3
     max_seq_len: int = 200
+    # ARM (Attention Refinement Module) — CoMER ECCV 2022
+    arm_kernel_size: int = 5    # 2D conv kernel for coverage map (paper: 5)
+    arm_d_coverage: int = 32    # intermediate channels in ARM (paper: 32)
+    # Counting module dropout
+    counting_dropout: float = 0.1
 
 
 @dataclass
@@ -98,14 +103,20 @@ class TrainConfig:
     # CTC auxiliary loss weight (0 to disable).
     ctc_weight: float = 0.1
     # Ramp CTC weight from 0 → ctc_weight over this many epochs.
-    # A random encoder produces CTC ≈ 55 at ep1. With ctc_warmup=10,
-    # weight=0.01 → eff_ctc=0.55 which is 9% of CE=6.2 — still noisy.
-    # With ctc_warmup=25, weight=0.004 → eff_ctc=0.22 (3.6% of CE).
     ctc_warmup_epochs: int = 25
 
+    # Counting auxiliary loss weight (binary-CE for symbol presence)
+    # Inspired by CAN (ECCV 2022): weakly supervised counting signal
+    counting_weight: float = 0.05
+
     # Curriculum augmentation: ramp aug probability from 0→1 over this many epochs.
-    # Prevents the model from seeing heavily distorted images before it learns basics.
     aug_warmup_epochs: int = 30
+
+    # Scale augmentation heights (Li et al. ICFHR 2020).
+    # During training, each image is randomly resized to one of these heights
+    # (maintaining aspect ratio) before padding. Helps with multi-scale symbols.
+    # Set to empty list to disable (use fixed img_height only).
+    scale_heights: Tuple[int, ...] = (96, 112, 128, 144)
 
     # LR restart decay: multiply lr_max by this factor on each cosine cycle restart.
     # Run 2: decay=0.5 → cycle-2 peak=1e-4. Still overshoots: ep56 exprate -5pp.

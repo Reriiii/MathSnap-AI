@@ -1,15 +1,31 @@
 """
-Transformer decoder for HMER.
+CoMER-style Transformer decoder with Attention Refinement Module (ARM).
 
-Standard Transformer decoder with multi-head cross-attention to
-encoder features. Supports greedy decoding and beam search.
+Key references:
+- CoMER (ECCV 2022, Zhao & Gao): coverage via ARM with self/cross-coverage
+- BTTR (ICCV 2021): Transformer baseline for HMER
+- Li et al. (ICFHR 2020): scale augmentation, drop-attention
+
+ARM summary:
+  Coverage c_t = sum_{k<t} A_k  (past attention weights, exclusive cumsum)
+  Refinement R = LayerNorm(ReLU(Conv2d(reshape(C))) @ W_proj)
+  Modified cross-attn energy: E' = E - R  (penalises already-parsed regions)
+  Final attention: A = softmax(E' / sqrt(d_k))
+
+Two coverage streams (CoMER fusion-coverage):
+  Self-coverage:  exclusive cumsum of current layer's own raw attention
+  Cross-coverage: inclusive cumsum of previous decoder layer's attention
+
+Training: all T positions processed in parallel via cumsum (no serial dep).
+Inference: full forward pass re-run at each step (correct, O(T^2), simple).
 """
 
 import math
+from typing import Optional, List, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class PositionalEncoding1D(nn.Module):
@@ -18,7 +34,6 @@ class PositionalEncoding1D(nn.Module):
     def __init__(self, d_model: int, max_len: int = 500, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1).float()
         div_term = torch.exp(
@@ -26,21 +41,208 @@ class PositionalEncoding1D(nn.Module):
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
 
-    def forward(self, x):
-        """x: [B, T, d_model]"""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
 
-class TransformerDecoder(nn.Module):
+class AttentionRefinementModule(nn.Module):
     """
-    Transformer decoder for autoregressive LaTeX sequence generation.
+    ARM from CoMER (ECCV 2022).
 
-    Uses cross-attention to attend to encoder features and
-    causal self-attention for autoregressive generation.
+    Computes a refinement term R from accumulated coverage C and subtracts
+    it from raw cross-attention energies BEFORE softmax.
+
+    R = LayerNorm(ReLU(Conv2d(C_2d)) @ W_proj)
+    E' = E - R
+
+    The coverage is reshaped from flat [L] to 2D [ho, wo] so that Conv2d
+    captures local spatial neighbourhood in the encoder feature map.
+    """
+
+    def __init__(self, nhead: int, kernel_size: int = 5, d_coverage: int = 32):
+        super().__init__()
+        self.nhead = nhead
+        self.d_coverage = d_coverage
+
+        self.conv = nn.Conv2d(
+            in_channels=nhead,
+            out_channels=d_coverage,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            bias=True,
+        )
+        self.proj = nn.Linear(d_coverage, nhead, bias=False)
+        self.norm = nn.LayerNorm(nhead)
+
+    def forward(self, coverage: torch.Tensor, ho: int, wo: int) -> torch.Tensor:
+        """
+        Args:
+            coverage: [B, H, T, L]  cumulative past attention weights
+            ho, wo:   spatial dims of encoder feature map (ho * wo == L)
+        Returns:
+            R: [B, H, T, L]  refinement to subtract from attention energies
+        """
+        B, H, T, L = coverage.shape
+
+        # [B, H, T, L] -> [B*T, H, ho, wo]
+        C = coverage.permute(0, 2, 1, 3).reshape(B * T, H, ho, wo)
+
+        # Conv: [B*T, H, ho, wo] -> [B*T, d_cov, ho, wo]
+        F_cov = torch.relu(self.conv(C))
+
+        # [B*T, d_cov, ho, wo] -> [B*T, L, d_cov] -> [B*T, L, H]
+        F_cov = F_cov.permute(0, 2, 3, 1).reshape(B * T, L, self.d_coverage)
+        R = self.norm(self.proj(F_cov))
+
+        # [B*T, L, H] -> [B, H, T, L]
+        return R.reshape(B, T, L, H).permute(0, 3, 1, 2)
+
+
+class CoverageMultiheadCrossAttention(nn.Module):
+    """
+    Multi-head cross-attention with ARM coverage refinement.
+
+    Self-coverage is computed via exclusive cumsum of raw softmax weights
+    (parallel, differentiable, no serial dependency during training).
+    Cross-coverage from the previous layer is passed in.
+    """
+
+    def __init__(self, d_model: int, nhead: int, dropout: float,
+                 arm: AttentionRefinementModule):
+        super().__init__()
+        assert d_model % nhead == 0
+        self.d_model = d_model
+        self.nhead = nhead
+        self.d_k = d_model // nhead
+        self.scale = math.sqrt(self.d_k)
+        self.arm = arm
+
+        self.q_proj   = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj   = nn.Linear(d_model, d_model, bias=False)
+        self.v_proj   = nn.Linear(d_model, d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.attn_drop = nn.Dropout(dropout)
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        B, S, _ = x.shape
+        return x.reshape(B, S, self.nhead, self.d_k).permute(0, 2, 1, 3)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cross_coverage: Optional[torch.Tensor],
+        ho: int,
+        wo: int,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, T, _ = query.shape
+
+        Q = self._split_heads(self.q_proj(query))
+        K = self._split_heads(self.k_proj(key))
+        V = self._split_heads(self.v_proj(value))
+
+        E = torch.matmul(Q, K.transpose(-2, -1)) / self.scale   # [B, H, T, L]
+
+        # Self-coverage via exclusive cumsum of raw attention
+        A_raw = torch.softmax(E, dim=-1)
+        self_coverage = torch.cumsum(A_raw, dim=2) - A_raw      # [B, H, T, L]
+
+        # Fusion-coverage: combine self + cross (CoMER §3.3)
+        total_coverage = self_coverage
+        if cross_coverage is not None:
+            total_coverage = total_coverage + cross_coverage
+
+        # Subtract ARM refinement from energies
+        R = self.arm(total_coverage, ho, wo)
+        E_refined = E - R
+
+        if key_padding_mask is not None:
+            E_refined = E_refined.masked_fill(
+                key_padding_mask.unsqueeze(1).unsqueeze(2), float('-inf')
+            )
+
+        A = torch.softmax(E_refined, dim=-1)
+        out = torch.matmul(self.attn_drop(A), V)
+        out = out.permute(0, 2, 1, 3).reshape(B, T, self.d_model)
+        return self.out_proj(out), A.detach()
+
+
+class CoMERDecoderLayer(nn.Module):
+    """
+    Pre-norm decoder layer with ARM coverage.
+
+    1. Causal self-attention  (standard)
+    2. Coverage cross-attention  (ARM-refined)
+    3. FFN with GELU
+    """
+
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int,
+                 dropout: float, arm: AttentionRefinementModule):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True
+        )
+        self.cross_attn = CoverageMultiheadCrossAttention(d_model, nhead, dropout, arm)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.drop1 = nn.Dropout(dropout)
+        self.drop2 = nn.Dropout(dropout)
+        self.drop3 = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        cross_coverage: Optional[torch.Tensor],
+        ho: int,
+        wo: int,
+        tgt_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = tgt
+        x2, _ = self.self_attn(
+            self.norm1(x), self.norm1(x), self.norm1(x),
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+            need_weights=False,
+        )
+        x = x + self.drop1(x2)
+
+        x2, attn = self.cross_attn(
+            query=self.norm2(x),
+            key=memory,
+            value=memory,
+            cross_coverage=cross_coverage,
+            ho=ho, wo=wo,
+        )
+        x = x + self.drop2(x2)
+        x = x + self.drop3(self.ffn(self.norm3(x)))
+        return x, attn
+
+
+class CoMERDecoder(nn.Module):
+    """
+    Full CoMER decoder: N layers with self-coverage + cross-coverage ARM.
+
+    Cross-coverage chaining:
+      layer 0: cross_coverage = None
+      layer i: cross_coverage = cumsum(attn_{i-1}, dim=2)
+
+    Inference: re-runs full forward() at each step so coverage accumulates
+    naturally via cumsum over the growing decoded sequence. Simple and correct.
     """
 
     def __init__(
@@ -53,102 +255,69 @@ class TransformerDecoder(nn.Module):
         dropout: float = 0.3,
         max_seq_len: int = 200,
         pad_idx: int = 0,
+        arm_kernel_size: int = 5,
+        arm_d_coverage: int = 32,
         length_norm_alpha: float = 0.6,
     ):
         super().__init__()
-
         self.d_model = d_model
+        self.nhead = nhead
         self.pad_idx = pad_idx
         self.max_seq_len = max_seq_len
-        # Length normalization exponent for beam search scores.
-        # Divides accumulated log-prob by length^alpha to prevent the beam
-        # from always preferring shorter sequences.  0.6 is a standard default.
         self.length_norm_alpha = length_norm_alpha
 
-        # Token embedding
-        self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_idx)
-
-        # Positional encoding
+        self.embedding   = nn.Embedding(vocab_size, d_model, padding_idx=pad_idx)
         self.pos_encoding = PositionalEncoding1D(d_model, max_len=max_seq_len, dropout=dropout)
 
-        # Transformer decoder layers
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True,  # Pre-LayerNorm for better training stability
-        )
-        self.transformer_decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=num_layers
-        )
-
-        # Output projection
+        self.arms = nn.ModuleList([
+            AttentionRefinementModule(nhead, arm_kernel_size, arm_d_coverage)
+            for _ in range(num_layers)
+        ])
+        self.layers = nn.ModuleList([
+            CoMERDecoderLayer(d_model, nhead, dim_feedforward, dropout, self.arms[i])
+            for i in range(num_layers)
+        ])
         self.output_proj = nn.Linear(d_model, vocab_size)
-
-        # Initialize weights
         self._init_weights()
 
     def _init_weights(self):
-        """Xavier uniform initialization."""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def _generate_causal_mask(self, size: int, device: torch.device) -> torch.Tensor:
-        """Generate causal (upper triangular) attention mask."""
-        mask = torch.triu(torch.ones(size, size, device=device), diagonal=1).bool()
-        return mask
+    def _causal_mask(self, size: int, device: torch.device) -> torch.Tensor:
+        return torch.triu(torch.ones(size, size, device=device), diagonal=1).bool()
 
-    def _generate_padding_mask(self, tgt: torch.Tensor) -> torch.Tensor:
-        """Generate padding mask for target sequence."""
-        return (tgt == self.pad_idx)  # [B, T], True where padded
+    def _pad_mask(self, tgt: torch.Tensor) -> torch.Tensor:
+        return tgt == self.pad_idx
 
     def forward(
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        feat_h: int,
+        feat_w: int,
     ) -> torch.Tensor:
-        """
-        Forward pass for training (teacher forcing).
-
-        Args:
-            tgt: [B, T] target token indices (with SOS, without final token for shift)
-            memory: [B, S, d_model] encoder output
-            tgt_mask: optional causal mask
-            tgt_key_padding_mask: optional padding mask
-
-        Returns:
-            logits: [B, T, vocab_size]
-        """
         B, T = tgt.shape
+        device = tgt.device
+        tgt_mask = self._causal_mask(T, device)
+        tgt_kpm  = self._pad_mask(tgt)
 
-        # Generate causal mask
-        if tgt_mask is None:
-            tgt_mask = self._generate_causal_mask(T, tgt.device)
-
-        # Generate padding mask
-        if tgt_key_padding_mask is None:
-            tgt_key_padding_mask = self._generate_padding_mask(tgt)
-
-        # Embed tokens
-        x = self.embedding(tgt) * math.sqrt(self.d_model)  # [B, T, d_model]
+        x = self.embedding(tgt) * math.sqrt(self.d_model)
         x = self.pos_encoding(x)
 
-        # Decode
-        output = self.transformer_decoder(
-            tgt=x,
-            memory=memory,
-            tgt_mask=tgt_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-        )
+        prev_attn: Optional[torch.Tensor] = None
+        for layer in self.layers:
+            x, attn = layer(
+                tgt=x, memory=memory,
+                cross_coverage=prev_attn,
+                ho=feat_h, wo=feat_w,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_kpm,
+            )
+            prev_attn = torch.cumsum(attn, dim=2)
 
-        # Project to vocabulary
-        logits = self.output_proj(output)  # [B, T, vocab_size]
-        return logits
+        return self.output_proj(x)
 
     @torch.no_grad()
     def greedy_decode(
@@ -156,47 +325,21 @@ class TransformerDecoder(nn.Module):
         memory: torch.Tensor,
         sos_idx: int,
         eos_idx: int,
+        feat_h: int,
+        feat_w: int,
         max_len: int = 200,
     ) -> torch.Tensor:
-        """
-        Greedy decoding (for inference).
-
-        Args:
-            memory: [B, S, d_model] encoder output
-            sos_idx: start-of-sequence token index
-            eos_idx: end-of-sequence token index
-            max_len: maximum decoding length
-
-        Returns:
-            decoded: [B, max_len] predicted token indices
-        """
         B = memory.size(0)
         device = memory.device
-
-        # Start with SOS
         decoded = torch.full((B, 1), sos_idx, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
 
         for _ in range(max_len - 1):
-            tgt_mask = self._generate_causal_mask(decoded.size(1), device)
-            tgt_key_padding_mask = self._generate_padding_mask(decoded)
-
-            x = self.embedding(decoded) * math.sqrt(self.d_model)
-            x = self.pos_encoding(x)
-
-            output = self.transformer_decoder(
-                tgt=x,
-                memory=memory,
-                tgt_mask=tgt_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-            )
-
-            logits = self.output_proj(output[:, -1:, :])  # Last position
-            next_token = logits.argmax(dim=-1)  # [B, 1]
-
-            decoded = torch.cat([decoded, next_token], dim=1)
-
-            # Check if all sequences have generated EOS
-            if (next_token.squeeze(-1) == eos_idx).all():
+            logits = self.forward(decoded, memory, feat_h, feat_w)
+            next_tok = logits[:, -1:, :].argmax(dim=-1)
+            decoded = torch.cat([decoded, next_tok], dim=1)
+            finished |= next_tok.squeeze(-1) == eos_idx
+            if finished.all():
                 break
 
         return decoded
@@ -207,119 +350,62 @@ class TransformerDecoder(nn.Module):
         memory: torch.Tensor,
         sos_idx: int,
         eos_idx: int,
+        feat_h: int,
+        feat_w: int,
         beam_size: int = 5,
         max_len: int = 200,
     ) -> torch.Tensor:
-        """
-        Beam search decoding with length normalization.
-
-        Scores are normalized by sequence_length ^ alpha before selecting
-        the best completed beam, preventing the decoder from systematically
-        preferring shorter outputs.
-
-        Args:
-            memory: [1, S, d_model] encoder output (batch_size must be 1)
-            sos_idx: start-of-sequence token index
-            eos_idx: end-of-sequence token index
-            beam_size: number of beams
-            max_len: maximum decoding length
-
-        Returns:
-            best_sequence: [1, T] best decoded sequence
-        """
+        """Beam search with length normalisation. memory: [1, S, d_model]."""
         device = memory.device
-        assert memory.size(0) == 1, "Beam search supports batch_size=1 only"
+        assert memory.size(0) == 1
 
-        # Expand memory once for all beams — kept fixed throughout decoding
-        # (never sliced), avoiding the alignment bug when beams complete early.
-        memory_expanded = memory.expand(beam_size, -1, -1)  # [beam, S, d_model]
-
-        # sequences[i] holds the current token sequence for beam i
+        mem = memory.expand(beam_size, -1, -1)
         sequences = torch.full((beam_size, 1), sos_idx, dtype=torch.long, device=device)
-        # Raw accumulated log-probs (unnormalized)
-        scores = torch.zeros(beam_size, device=device)
-        scores[1:] = -float('inf')  # Only beam 0 is active at step 0
+        scores    = torch.zeros(beam_size, device=device)
+        scores[1:] = -float('inf')
+        active    = torch.ones(beam_size, dtype=torch.bool, device=device)
+        completed: List[Tuple[float, torch.Tensor]] = []
 
-        # active_mask: which beam slots are still generating (not yet hit EOS)
-        active_mask = torch.ones(beam_size, dtype=torch.bool, device=device)
-
-        completed_beams: list[tuple[float, torch.Tensor]] = []
-
-        for step in range(max_len - 1):
-            active_indices = active_mask.nonzero(as_tuple=True)[0]
-            n_active = active_indices.size(0)
+        for _ in range(max_len - 1):
+            n_active = int(active.sum().item())
             if n_active == 0:
                 break
 
-            # Run decoder only on currently active beams
-            seqs_active = sequences[active_indices]           # [n_active, t]
-            mem_active = memory_expanded[:n_active]           # [n_active, S, d]
+            idx     = active.nonzero(as_tuple=True)[0]
+            s_act   = sequences[idx]
+            m_act   = mem[:n_active]
 
-            t = seqs_active.size(1)
-            tgt_mask = self._generate_causal_mask(t, device)
-            tgt_key_padding_mask = self._generate_padding_mask(seqs_active)
+            logits    = self.forward(s_act, m_act, feat_h, feat_w)
+            log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
 
-            x = self.embedding(seqs_active) * math.sqrt(self.d_model)
-            x = self.pos_encoding(x)
-            output = self.transformer_decoder(
-                tgt=x,
-                memory=mem_active,
-                tgt_mask=tgt_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-            )
-            logits = self.output_proj(output[:, -1, :])       # [n_active, vocab]
-            log_probs = F.log_softmax(logits, dim=-1)          # [n_active, vocab]
+            V = log_probs.size(-1)
+            next_scores = (scores[idx].unsqueeze(-1) + log_probs).view(-1)
+            topk_scores, topk_flat = next_scores.topk(min(beam_size, next_scores.size(0)))
+            beam_w  = topk_flat // V
+            token_w = topk_flat % V
 
-            vocab_size = log_probs.size(-1)
+            new_seqs = torch.cat([s_act[beam_w], token_w.unsqueeze(-1)], dim=1)
+            filled   = new_seqs.size(0)
 
-            # Expand current scores and add new log_probs
-            cur_scores = scores[active_indices].unsqueeze(-1)  # [n_active, 1]
-            next_scores = cur_scores + log_probs               # [n_active, vocab]
-
-            # Flatten and pick top beam_size candidates across all active beams
-            flat = next_scores.view(-1)                        # [n_active * vocab]
-            topk_scores, topk_flat = flat.topk(min(beam_size, flat.size(0)))
-
-            # Map flat indices back to (beam_within_active, token)
-            beam_within_active = topk_flat // vocab_size
-            token_ids = topk_flat % vocab_size
-
-            # Reconstruct new sequences for all candidate beams
-            new_sequences = torch.cat([
-                seqs_active[beam_within_active],               # parent sequences
-                token_ids.unsqueeze(-1)                        # new tokens
-            ], dim=1)                                          # [beam_size, t+1]
-
-            # Update global state: place new beams back into fixed-size buffers
-            new_scores = topk_scores
-            filled = new_sequences.size(0)
-            sequences = torch.zeros(beam_size, new_sequences.size(1),
-                                    dtype=torch.long, device=device)
-            sequences[:filled] = new_sequences
+            sequences = torch.zeros(beam_size, new_seqs.size(1), dtype=torch.long, device=device)
+            sequences[:filled] = new_seqs
             scores = torch.full((beam_size,), -float('inf'), device=device)
-            scores[:filled] = new_scores
-            active_mask = torch.zeros(beam_size, dtype=torch.bool, device=device)
+            scores[:filled] = topk_scores
+            active = torch.zeros(beam_size, dtype=torch.bool, device=device)
 
-            # Handle EOS tokens
             for i in range(filled):
-                if token_ids[i].item() == eos_idx:
-                    seq_len = new_sequences.size(1)
-                    norm = (seq_len ** self.length_norm_alpha)
-                    completed_beams.append((new_scores[i].item() / norm,
-                                            new_sequences[i].clone()))
+                if token_w[i].item() == eos_idx:
+                    norm = new_seqs.size(1) ** self.length_norm_alpha
+                    completed.append((topk_scores[i].item() / norm, new_seqs[i].clone()))
                 else:
-                    active_mask[i] = True
+                    active[i] = True
 
-        # Add remaining active beams as completed (no EOS found within max_len)
         for i in range(beam_size):
-            if active_mask[i]:
-                seq_len = sequences[i].size(0)
-                norm = (seq_len ** self.length_norm_alpha)
-                completed_beams.append((scores[i].item() / norm, sequences[i].clone()))
+            if active[i]:
+                norm = sequences[i].size(0) ** self.length_norm_alpha
+                completed.append((scores[i].item() / norm, sequences[i].clone()))
 
-        if not completed_beams:
+        if not completed:
             return sequences[:1]
-
-        # Return the beam with the highest length-normalized score
-        best_score, best_seq = max(completed_beams, key=lambda x: x[0])
-        return best_seq.unsqueeze(0)
+        _, best = max(completed, key=lambda x: x[0])
+        return best.unsqueeze(0)

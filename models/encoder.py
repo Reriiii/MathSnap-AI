@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from typing import Tuple
 
 
 class _DenseLayer(nn.Module):
@@ -208,27 +209,21 @@ class DenseNetEncoder(nn.Module):
         self.d_model = d_model
         self._num_features = num_features
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
         """
         Args:
             x: [B, 1, H, W] grayscale image
 
         Returns:
-            features: [B, S, d_model] where S = H' * W' (flattened feature map)
+            features: [B, S, d_model] where S = feat_h * feat_w
+            feat_h:   encoder feature map height
+            feat_w:   encoder feature map width
         """
-        # Extract features
         features = self.features(x)  # [B, C, H', W']
         features = F.relu(features, inplace=True)
+        features = self.projection(features)   # [B, d_model, H', W']
+        features = self.pos_encoding(features) # [B, d_model, H', W']
 
-        # Project to d_model
-        features = self.projection(features)  # [B, d_model, H', W']
-
-        # Add 2D positional encoding
-        features = self.pos_encoding(features)  # [B, d_model, H', W']
-
-        # Flatten spatial dimensions to sequence
         B, C, H, W = features.shape
-        features = features.view(B, C, H * W)  # [B, d_model, S]
-        features = features.permute(0, 2, 1)    # [B, S, d_model]
-
-        return features
+        features = features.view(B, C, H * W).permute(0, 2, 1)  # [B, S, d_model]
+        return features, H, W
