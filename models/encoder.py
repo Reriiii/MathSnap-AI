@@ -209,6 +209,8 @@ class DenseNetEncoder(nn.Module):
 
             if i < num_transitions:
                 out_features = int(num_features * compression)
+                # Round to nearest multiple of num_groups for clean GroupNorm
+                out_features = max(num_groups, (out_features // num_groups) * num_groups)
                 trans = _Transition(num_features, out_features, num_groups)
                 self.transitions.append(trans)
                 num_features = out_features
