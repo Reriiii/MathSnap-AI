@@ -25,6 +25,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
@@ -104,41 +105,34 @@ def get_lr_scheduler(optimizer, config: Config, steps_per_epoch: int, constant_l
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def _calibrate_bn(model: nn.Module, dataloader, device: str, num_batches: int = 30):
-    """
-    Recalibrate BatchNorm running statistics before validation.
 
-    During curriculum augmentation the training data distribution shifts
-    gradually as aug_prob increases. BN running_mean/var track the augmented
-    training distribution; when the model switches to eval() for validation
-    (which uses clean, unaugmented images) the mismatch can cause a complete
-    decoding failure for one epoch.
+def _reverse_targets(targets: torch.Tensor, pad_idx: int, sos_idx: int, eos_idx: int) -> torch.Tensor:
+    """Reverse content tokens in target sequences, keeping SOS/EOS framing.
 
-    This function forwards a small number of training batches through the
-    encoder in train() mode (no gradient accumulation, no optimizer update)
-    so that the running stats reflect the current epoch's distribution before
-    validation begins.  30 batches is enough for momentum=0.1 to converge.
+    [SOS, t1, t2, ..., tn, EOS, PAD, ...] -> [SOS, tn, ..., t2, t1, EOS, PAD, ...]
+    Used for R2L decoder in bidirectional training (BTTR, ICCV 2021).
     """
-    model.train()
-    with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            if i >= num_batches:
-                break
-            model.encoder(batch['image'].to(device))
+    r2l = targets.clone()
+    for i in range(targets.size(0)):
+        content_mask = (targets[i] != pad_idx) & (targets[i] != sos_idx) & (targets[i] != eos_idx)
+        content = targets[i, content_mask]
+        r2l[i, content_mask] = content.flip(0)
+    return r2l
 
 
 def train_one_epoch(
     model, dataloader, optimizer, scheduler, criterion, ctc_criterion,
-    scaler, config, epoch, pad_idx, vocab_size
+    scaler, config, epoch, pad_idx, vocab_size, sos_idx, eos_idx
 ):
     """
     Train for one epoch.
 
-    Loss = CE  +  ctc_w * CTC  +  counting_w * CountingBCE
+    Loss = CE_l2r + CE_r2l + ctc_w * CTC + counting_w * CountingBCE
 
-    CTC weight is ramped from 0 → ctc_weight over ctc_warmup_epochs.
+    CTC weight is ramped from 0 -> ctc_weight over ctc_warmup_epochs.
     Counting loss is binary-CE: model predicts which vocab tokens are
     present in the target sequence (weakly supervised, no location needed).
+    R2L branch (BTTR): trains a second decoder on reversed targets.
     """
     model.train()
     total_loss = 0
@@ -147,13 +141,14 @@ def train_one_epoch(
     total_cnt_loss = 0
     num_batches = 0
 
-    # Ramp CTC weight: 0 at epoch 1 → full at epoch ctc_warmup_epochs+1
+    # Ramp CTC weight: 0 at epoch 1 -> full at epoch ctc_warmup_epochs+1
     if config.train.ctc_weight > 0 and config.train.ctc_warmup_epochs > 0:
         ctc_w = config.train.ctc_weight * min(1.0, epoch / config.train.ctc_warmup_epochs)
     else:
         ctc_w = config.train.ctc_weight
 
     counting_w = config.train.counting_weight
+    use_bidi = model.bidirectional and model.decoder_r2l is not None
 
     pbar = tqdm(dataloader, desc=f"Train Epoch {epoch}", leave=False)
     use_ctc      = ctc_w > 0 and ctc_criterion is not None
@@ -163,6 +158,11 @@ def train_one_epoch(
         images  = batch['image'].to(config.device)
         targets = batch['target'].to(config.device)
         B       = images.size(0)
+
+        # Build R2L targets for bidirectional training
+        targets_r2l = None
+        if use_bidi:
+            targets_r2l = _reverse_targets(targets, pad_idx, sos_idx, eos_idx)
 
         # Build counting targets: 1 if token appears in this sample's sequence
         if use_counting:
@@ -175,21 +175,37 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         def compute_losses():
-            # model.forward now returns (logits, counts)
-            logits, counts = model(images, targets)
-            tgt_out = targets[:, 1:]           # remove SOS
-            logits  = logits[:, :tgt_out.size(1), :]
-            ce = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
+            # Encode once, reuse for all heads
+            memory, feat_h, feat_w, intermediates = model.encode(images)
 
-            # Counting loss: binary cross-entropy over vocab presence
+            # L2R decoder (teacher forcing)
+            tgt_input = targets[:, :-1]
+            logits_l2r = model.decoder(tgt_input, memory, feat_h, feat_w)
+            tgt_out = targets[:, 1:]
+            logits_l2r = logits_l2r[:, :tgt_out.size(1), :]
+            ce_l2r = criterion(logits_l2r.reshape(-1, logits_l2r.size(-1)), tgt_out.reshape(-1))
+
+            # R2L decoder (bidirectional)
+            ce_r2l = torch.zeros(1, device=images.device)
+            if use_bidi and targets_r2l is not None:
+                tgt_input_r2l = targets_r2l[:, :-1]
+                logits_r2l = model.decoder_r2l(tgt_input_r2l, memory, feat_h, feat_w)
+                tgt_out_r2l = targets_r2l[:, 1:]
+                logits_r2l = logits_r2l[:, :tgt_out_r2l.size(1), :]
+                ce_r2l = criterion(logits_r2l.reshape(-1, logits_r2l.size(-1)),
+                                   tgt_out_r2l.reshape(-1))
+
+            ce = ce_l2r + ce_r2l
+
+            # Multi-scale counting loss
             cnt = torch.zeros(1, device=images.device)
             if use_counting:
+                counts = model.counting_module(intermediates)
                 cnt = F.binary_cross_entropy(counts, count_targets)
 
-            # CTC on encoder output (uses cached memory from encode())
+            # CTC on encoder output (reuses memory)
             ctc = torch.zeros(1, device=images.device)
             if use_ctc:
-                memory, feat_h, feat_w = model.encode(images)
                 S = memory.size(1)
                 ctc_log_probs = model.ctc_head(memory).log_softmax(-1).permute(1, 0, 2)
                 in_lens  = torch.full((B,), S, dtype=torch.long, device=images.device)
@@ -249,8 +265,8 @@ def validate(model, dataloader, vocab, criterion, config):
         images = batch['image'].to(config.device)
         targets = batch['target'].to(config.device)
 
-        # Compute validation loss (CE only — no aux losses during validation)
-        logits, _ = model(images, targets)
+        # Compute validation loss (L2R CE only — no aux losses during validation)
+        logits, _, _ = model(images, targets)
         tgt_out   = targets[:, 1:]
         logits    = logits[:, :tgt_out.size(1), :]
         loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
@@ -376,6 +392,7 @@ def main():
         config.decoder.dropout = 0.0        # No dropout in decoder
         config.train.ctc_weight = 0.0       # No aux losses
         config.train.counting_weight = 0.0
+        config.decoder.bidirectional = False  # Simpler for overfit test
 
         train_loader = get_dataloader('train', vocab, config, shuffle=False)
         # Limit to num_samples
@@ -478,25 +495,9 @@ def main():
         # Train
         train_loss, train_ce_loss, train_ctc_loss, train_cnt_loss = train_one_epoch(
             model, train_loader, optimizer, scheduler, criterion, ctc_criterion,
-            scaler, config, epoch, vocab.pad_idx, len(vocab)
+            scaler, config, epoch, vocab.pad_idx, len(vocab),
+            vocab.sos_idx, vocab.eos_idx
         )
-
-        # --- BN calibration before validation ---
-        # During aug warmup, training data distribution shifts each epoch as
-        # aug_prob increases. BN running stats track the augmented-train
-        # distribution and diverge from clean validation images, causing
-        # single-epoch exprate spikes (ep17: 17%→1.3%, ep21: 19%→2.6%).
-        # Fix: forward unaugmented batches through encoder in train() mode
-        # to re-sync running stats before eval.
-        #
-        # Run 3 post-mortem: spike at ep31 (+0.12 val_loss, -4.7pp exprate)
-        # because aug_prob=1.0 exactly at ep30 → calibration stopped.
-        # ep31 = first epoch with FULL augmentation but BN stats from ep30
-        # partial aug. Extend window 2 epochs past ramp completion to cover
-        # the transition from partial → full augmentation.
-        calibrate_window = config.train.aug_warmup_epochs + 2
-        if config.data.augment and epoch <= calibrate_window:
-            _calibrate_bn(model, train_loader, config.device, num_batches=30)
 
         # Validate
         val_metrics, val_preds, val_targets, val_images, val_paths = validate(

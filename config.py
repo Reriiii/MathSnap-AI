@@ -55,9 +55,11 @@ class EncoderConfig:
     drop_rate: float = 0.2
     # Higher compression: keeps more features through transition layers (was 0.5)
     compression: float = 0.8
-    # 2 transitions → 256 encoder tokens (8×32) for 128×512 input.
-    # 3 transitions (original) → only 64 tokens (4×16), too sparse for long expressions.
+    # 2 transitions -> 256 encoder tokens (8x32) for 128x512 input.
+    # 3 transitions (original) -> only 64 tokens (4x16), too sparse for long expressions.
     num_transitions: int = 2
+    # GroupNorm groups (replaces BatchNorm to avoid curriculum augmentation distribution shift)
+    num_groups: int = 32
 
 
 @dataclass
@@ -74,6 +76,10 @@ class DecoderConfig:
     arm_d_coverage: int = 32    # intermediate channels in ARM (paper: 32)
     # Counting module dropout
     counting_dropout: float = 0.1
+    # Multi-scale counting common channel dim (CAN, ECCV 2022)
+    counting_common_channels: int = 128
+    # Bidirectional training (BTTR, ICCV 2021)
+    bidirectional: bool = True
 
 
 @dataclass

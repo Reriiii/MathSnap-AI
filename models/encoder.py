@@ -8,10 +8,14 @@ of 2D features with positional encoding for the Transformer decoder.
 Key design choice — number of transition layers:
   With img_height=128, img_max_width=512 and the standard initial
   conv (stride=2) + maxpool (stride=2), the feature map entering the
-  dense blocks is already 32×128. Each transition halves both dims:
-    3 transitions → 4×16 = 64 tokens  (too sparse for 200-token exprs)
-    2 transitions → 8×32 = 256 tokens (recommended)
+  dense blocks is already 32x128. Each transition halves both dims:
+    3 transitions -> 4x16 = 64 tokens  (too sparse for 200-token exprs)
+    2 transitions -> 8x32 = 256 tokens (recommended)
   Use num_transitions=2 to preserve spatial resolution.
+
+GroupNorm is used instead of BatchNorm to avoid distribution shift
+issues during curriculum augmentation (BN running stats diverge when
+aug_prob ramps up gradually, causing validation spikes).
 """
 
 import math
@@ -19,26 +23,28 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
-from typing import Tuple
+from typing import Tuple, List
+
+
+def _get_num_groups(channels: int, target_groups: int = 32) -> int:
+    """Pick the largest divisor of channels that is <= target_groups."""
+    for g in range(target_groups, 0, -1):
+        if channels % g == 0:
+            return g
+    return 1
 
 
 class _DenseLayer(nn.Module):
-    """Single dense layer: BN -> ReLU -> 1x1 Conv -> BN -> ReLU -> 3x3 Conv.
+    """Single dense layer: GN -> ReLU -> 1x1 Conv -> GN -> ReLU -> 3x3 Conv."""
 
-    BatchNorm momentum is set to 0.05 (half the PyTorch default of 0.1).
-    Lower momentum makes running_mean/var track distribution shifts more
-    smoothly — important when training data distribution changes gradually
-    due to curriculum augmentation ramp-up.
-    """
-    _BN_MOMENTUM = 0.05
-
-    def __init__(self, in_channels: int, growth_rate: int, bn_size: int, drop_rate: float):
+    def __init__(self, in_channels: int, growth_rate: int, bn_size: int,
+                 drop_rate: float, num_groups: int = 32):
         super().__init__()
         inter_channels = bn_size * growth_rate
 
-        self.norm1 = nn.BatchNorm2d(in_channels, momentum=self._BN_MOMENTUM)
+        self.norm1 = nn.GroupNorm(_get_num_groups(in_channels, num_groups), in_channels)
         self.conv1 = nn.Conv2d(in_channels, inter_channels, kernel_size=1, bias=False)
-        self.norm2 = nn.BatchNorm2d(inter_channels, momentum=self._BN_MOMENTUM)
+        self.norm2 = nn.GroupNorm(_get_num_groups(inter_channels, num_groups), inter_channels)
         self.conv2 = nn.Conv2d(inter_channels, growth_rate, kernel_size=3, padding=1, bias=False)
         self.drop_rate = drop_rate
 
@@ -54,13 +60,13 @@ class _DenseBlock(nn.Module):
     """A block of multiple dense layers."""
 
     def __init__(self, num_layers: int, in_channels: int, growth_rate: int,
-                 bn_size: int, drop_rate: float):
+                 bn_size: int, drop_rate: float, num_groups: int = 32):
         super().__init__()
         self.layers = nn.ModuleList()
         for i in range(num_layers):
             layer = _DenseLayer(
                 in_channels + i * growth_rate,
-                growth_rate, bn_size, drop_rate
+                growth_rate, bn_size, drop_rate, num_groups
             )
             self.layers.append(layer)
 
@@ -71,11 +77,11 @@ class _DenseBlock(nn.Module):
 
 
 class _Transition(nn.Module):
-    """Transition layer: BN -> 1x1 Conv -> AvgPool."""
+    """Transition layer: GN -> 1x1 Conv -> AvgPool."""
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, num_groups: int = 32):
         super().__init__()
-        self.norm = nn.BatchNorm2d(in_channels, momentum=_DenseLayer._BN_MOMENTUM)
+        self.norm = nn.GroupNorm(_get_num_groups(in_channels, num_groups), in_channels)
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
         self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
 
@@ -127,11 +133,11 @@ class PositionalEncoding2D(nn.Module):
             x with positional encoding added: [B, C, H, W]
         """
         B, C, H, W = x.shape
-        # [H, W, half] — broadcast height enc across all columns
+        # [H, W, half] -- broadcast height enc across all columns
         pos_h = self.pe_h[:H, :].unsqueeze(1).expand(-1, W, -1)
-        # [H, W, half] — broadcast width enc across all rows
+        # [H, W, half] -- broadcast width enc across all rows
         pos_w = self.pe_w[:W, :].unsqueeze(0).expand(H, -1, -1)
-        # Concatenate → [H, W, C], permute → [C, H, W], broadcast over batch
+        # Concatenate -> [H, W, C], permute -> [C, H, W], broadcast over batch
         pos = torch.cat([pos_h, pos_w], dim=-1).permute(2, 0, 1)
         return self.dropout(x + pos.unsqueeze(0))
 
@@ -147,8 +153,11 @@ class DenseNetEncoder(nn.Module):
     layers are inserted between dense blocks. Fewer transitions preserve
     spatial resolution and produce more encoder tokens for the decoder
     to attend to:
-        num_transitions=3 (default DenseNet) → 64 tokens  for 128×512 input
-        num_transitions=2 (recommended)      → 256 tokens for 128×512 input
+        num_transitions=3 (default DenseNet) -> 64 tokens  for 128x512 input
+        num_transitions=2 (recommended)      -> 256 tokens for 128x512 input
+
+    Also exposes intermediate feature maps from each dense block for use
+    by the multi-scale counting module (CAN, ECCV 2022).
     """
 
     def __init__(
@@ -163,21 +172,27 @@ class DenseNetEncoder(nn.Module):
         d_model: int = 256,
         num_transitions: int = 2,
         pos_dropout: float = 0.1,
+        num_groups: int = 32,
     ):
         super().__init__()
+        self.num_blocks = len(block_config)
+        self.num_transitions = num_transitions
 
         # Initial convolution
-        self.features = nn.Sequential(OrderedDict([
+        self.init_conv = nn.Sequential(OrderedDict([
             ('conv0', nn.Conv2d(in_channels, num_init_features, kernel_size=7,
                                 stride=2, padding=3, bias=False)),
-            ('norm0', nn.BatchNorm2d(num_init_features, momentum=_DenseLayer._BN_MOMENTUM)),
+            ('norm0', nn.GroupNorm(_get_num_groups(num_init_features, num_groups),
+                                   num_init_features)),
             ('relu0', nn.ReLU(inplace=True)),
             ('pool0', nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
         ]))
 
-        # Dense blocks and transitions
-        # Transitions are inserted after the first num_transitions blocks only.
-        # This preserves spatial resolution in later blocks.
+        # Dense blocks and transitions (stored separately to capture intermediates)
+        self.dense_blocks = nn.ModuleList()
+        self.transitions = nn.ModuleList()
+        self._block_out_channels = []
+
         num_features = num_init_features
         for i, num_layers in enumerate(block_config):
             block = _DenseBlock(
@@ -185,20 +200,22 @@ class DenseNetEncoder(nn.Module):
                 in_channels=num_features,
                 growth_rate=growth_rate,
                 bn_size=bn_size,
-                drop_rate=drop_rate
+                drop_rate=drop_rate,
+                num_groups=num_groups,
             )
-            self.features.add_module(f'denseblock{i + 1}', block)
+            self.dense_blocks.append(block)
             num_features = num_features + num_layers * growth_rate
+            self._block_out_channels.append(num_features)
 
-            if i < num_transitions:  # Only insert transition after first num_transitions blocks
+            if i < num_transitions:
                 out_features = int(num_features * compression)
-                trans = _Transition(num_features, out_features)
-                self.features.add_module(f'transition{i + 1}', trans)
+                trans = _Transition(num_features, out_features, num_groups)
+                self.transitions.append(trans)
                 num_features = out_features
 
-        # Final batch norm
-        self.features.add_module('norm_final',
-                                  nn.BatchNorm2d(num_features, momentum=_DenseLayer._BN_MOMENTUM))
+        # Final norm
+        self.norm_final = nn.GroupNorm(_get_num_groups(num_features, num_groups),
+                                       num_features)
 
         # Project to d_model
         self.projection = nn.Conv2d(num_features, d_model, kernel_size=1)
@@ -209,21 +226,38 @@ class DenseNetEncoder(nn.Module):
         self.d_model = d_model
         self._num_features = num_features
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
+    @property
+    def block_out_channels(self) -> List[int]:
+        """Channel counts after each dense block (before transition)."""
+        return list(self._block_out_channels)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, int, List[torch.Tensor]]:
         """
         Args:
             x: [B, 1, H, W] grayscale image
 
         Returns:
-            features: [B, S, d_model] where S = feat_h * feat_w
-            feat_h:   encoder feature map height
-            feat_w:   encoder feature map width
+            features:       [B, S, d_model] where S = feat_h * feat_w
+            feat_h:         encoder feature map height
+            feat_w:         encoder feature map width
+            intermediates:  list of [B, C_i, H_i, W_i] feature maps from each dense block
         """
-        features = self.features(x)  # [B, C, H', W']
-        features = F.relu(features, inplace=True)
-        features = self.projection(features)   # [B, d_model, H', W']
-        features = self.pos_encoding(features) # [B, d_model, H', W']
+        x = self.init_conv(x)
 
-        B, C, H, W = features.shape
-        features = features.view(B, C, H * W).permute(0, 2, 1)  # [B, S, d_model]
-        return features, H, W
+        intermediates = []
+        trans_idx = 0
+        for i, block in enumerate(self.dense_blocks):
+            x = block(x)
+            intermediates.append(x)
+            if i < self.num_transitions:
+                x = self.transitions[trans_idx](x)
+                trans_idx += 1
+
+        x = self.norm_final(x)
+        x = F.relu(x, inplace=True)
+        x = self.projection(x)        # [B, d_model, H', W']
+        x = self.pos_encoding(x)      # [B, d_model, H', W']
+
+        B, C, H, W = x.shape
+        features = x.view(B, C, H * W).permute(0, 2, 1)  # [B, S, d_model]
+        return features, H, W, intermediates
