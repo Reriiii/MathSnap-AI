@@ -23,6 +23,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -104,6 +105,38 @@ def get_lr_scheduler(optimizer, config: Config, steps_per_epoch: int, constant_l
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+
+
+@torch.no_grad()
+def _calibrate_bn(model, dataloader, config, num_batches: int = 30):
+    """Re-sync BatchNorm running stats before validation.
+
+    Resets running stats, then accumulates fresh statistics using cumulative
+    moving average (momentum=None) over num_batches forward passes. This
+    produces exact batch statistics instead of the lagged exponential average
+    that can diverge with low momentum and few training steps.
+    """
+    model.train()
+
+    # Reset and switch to cumulative average for precise calibration
+    for m in model.encoder.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.reset_running_stats()
+            m.momentum = None  # cumulative moving average
+
+    for i, batch in enumerate(dataloader):
+        if i >= num_batches:
+            break
+        images = batch['image'].to(config.device)
+        model.encode(images)
+
+    # Restore original momentum for training
+    bn_momentum = 0.05
+    for m in model.encoder.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.momentum = bn_momentum
+
+    model.eval()
 
 
 def _reverse_targets(targets: torch.Tensor, pad_idx: int, sos_idx: int, eos_idx: int) -> torch.Tensor:
@@ -201,7 +234,7 @@ def train_one_epoch(
             cnt = torch.zeros(1, device=images.device)
             if use_counting:
                 counts = model.counting_module(intermediates)
-                cnt = F.binary_cross_entropy(counts, count_targets)
+                cnt = F.binary_cross_entropy_with_logits(counts, count_targets)
 
             # CTC on encoder output (reuses memory)
             ctc = torch.zeros(1, device=images.device)
@@ -398,7 +431,7 @@ def main():
         # Limit to num_samples
         train_loader.dataset.entries = train_loader.dataset.entries[:args.num_samples]
         val_loader = train_loader  # Validate on same data
-        print(f"\n⚡ Overfitting test: {args.num_samples} samples, {config.train.epochs} epochs")
+        print(f"\n[OVERFIT TEST] {args.num_samples} samples, {config.train.epochs} epochs")
         print(f"  Regularization disabled: label_smoothing=0, dropout=0, weight_decay=0")
     else:
         train_loader = get_dataloader('train', vocab, config)
@@ -426,10 +459,13 @@ def main():
     )
 
     steps_per_epoch = len(train_loader)
-    scheduler = get_lr_scheduler(
-        optimizer, config, steps_per_epoch,
-        constant_lr=args.overfit_test  # Constant LR for overfitting test
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # suppress lr_scheduler before optimizer.step() warning
+        scheduler = get_lr_scheduler(
+            optimizer, config, steps_per_epoch,
+            constant_lr=args.overfit_test  # Constant LR for overfitting test
+        )
+        scheduler.step()  # initialize step counter so per-batch stepping works cleanly
 
     # Secondary scheduler: halves LR when ExpRate stops improving for patience//3
     # epochs. Works on top of the cosine restarts to escape deep plateaus.
@@ -499,6 +535,10 @@ def main():
             vocab.sos_idx, vocab.eos_idx
         )
 
+        # Calibrate BN before validation — resets running stats and recomputes
+        # from training data so eval mode matches train mode exactly.
+        _calibrate_bn(model, train_loader, config)
+
         # Validate
         val_metrics, val_preds, val_targets, val_images, val_paths = validate(
             model, val_loader, vocab, criterion, config
@@ -551,7 +591,7 @@ def main():
         n_show = min(3, len(val_preds))
         print(f"\n  Sample predictions:")
         for i in range(n_show):
-            match = "✓" if val_preds[i].strip() == val_targets[i].strip() else "✗"
+            match = "OK" if val_preds[i].strip() == val_targets[i].strip() else "XX"
             print(f"    {match} GT:   {val_targets[i][:60]}")
             print(f"      Pred: {val_preds[i][:60]}")
 
@@ -566,7 +606,7 @@ def main():
         )
         if is_restart_epoch:
             restart_grace_remaining = config.train.lr_restart_warmup_epochs + 3
-            print(f"  \u21ba LR restart detected ({prev_epoch_end_lr:.2e} \u2192 {current_lr:.2e}). "
+            print(f"  LR restart detected ({prev_epoch_end_lr:.2e} -> {current_lr:.2e}). "
                   f"Grace period: {restart_grace_remaining} epochs")
         prev_epoch_end_lr = current_lr
         if restart_grace_remaining > 0:
@@ -604,7 +644,7 @@ def main():
         # Save best
         if is_best:
             torch.save(checkpoint, os.path.join(config.train.checkpoint_dir, 'best.pt'))
-            print(f"  ★ New best ExpRate: {best_exprate:.2f}%")
+            print(f"  * New best ExpRate: {best_exprate:.2f}%")
 
         # Save history and plots periodically
         save_history(history, config.train.output_dir)

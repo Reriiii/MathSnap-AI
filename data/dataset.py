@@ -262,7 +262,19 @@ def collate_fn(batch: List[dict]) -> dict:
     Pads targets to the same length within the batch.
     Images are already padded to img_max_width.
     """
-    images = torch.stack([item['image'] for item in batch])
+    # Pad images to same height within batch (scale augmentation produces variable heights)
+    max_h = max(item['image'].size(1) for item in batch)
+    max_w = max(item['image'].size(2) for item in batch)
+    padded_images = []
+    for item in batch:
+        img = item['image']  # [1, H, W]
+        pad_h = max_h - img.size(1)
+        pad_w = max_w - img.size(2)
+        if pad_h > 0 or pad_w > 0:
+            # Pad bottom and right with white (1.0 for normalized, 255-based)
+            img = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h), value=1.0)
+        padded_images.append(img)
+    images = torch.stack(padded_images)
 
     # Get max target length in this batch
     max_len = max(item['target'].size(0) for item in batch)

@@ -121,7 +121,7 @@ class MultiScaleCountingModule(nn.Module):
         # Predict per-class presence
         fused = self.drop(fused)
         logits = self.output_conv(fused)           # [B, vocab_size, H, W]
-        return torch.sigmoid(logits.mean(dim=(2, 3)))  # [B, vocab_size]
+        return logits.mean(dim=(2, 3))  # [B, vocab_size] raw logits
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +275,6 @@ class HMERModel(nn.Module):
         With bidirectional=True, runs both L2R and R2L decoders and
         picks the result with higher length-normalized log-probability.
         """
-        self.eval()
         memory, feat_h, feat_w, _ = self.encoder(images)
 
         def _decode(decoder):
