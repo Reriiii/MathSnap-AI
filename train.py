@@ -284,8 +284,14 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(model, dataloader, vocab, criterion, config):
-    """Validate and compute metrics."""
+def validate(model, dataloader, vocab, criterion, config, run_generate: bool = False):
+    """Validate and compute metrics.
+
+    Args:
+        run_generate: if True, run expensive autoregressive generation and
+                      compute ExpRate/BLEU. If False, only compute val loss
+                      (much faster — single parallel forward pass).
+    """
     model.eval()
     total_loss = 0
     num_batches = 0
@@ -293,12 +299,15 @@ def validate(model, dataloader, vocab, criterion, config):
     all_targets = []
     all_images = []
     all_image_paths = []
+    max_gen_samples = config.train.val_generate_max_samples
+    num_generated = 0
 
-    for batch in tqdm(dataloader, desc="Validating", leave=False):
+    desc = "Validating (full)" if run_generate else "Validating (loss)"
+    for batch in tqdm(dataloader, desc=desc, leave=False):
         images = batch['image'].to(config.device)
         targets = batch['target'].to(config.device)
 
-        # Compute validation loss (L2R CE only — no aux losses during validation)
+        # Compute validation loss (L2R CE only — parallel teacher-forcing, always fast)
         logits, _, _ = model(images, targets)
         tgt_out   = targets[:, 1:]
         logits    = logits[:, :tgt_out.size(1), :]
@@ -306,43 +315,40 @@ def validate(model, dataloader, vocab, criterion, config):
         total_loss += loss.item()
         num_batches += 1
 
-        # Generate predictions
-        preds = model.generate(
-            images,
-            sos_idx=vocab.sos_idx,
-            eos_idx=vocab.eos_idx,
-            max_len=config.data.max_seq_len,
-        )
+        # Autoregressive generation — only on generate epochs, capped at max_gen_samples
+        if run_generate and (max_gen_samples == 0 or num_generated < max_gen_samples):
+            preds = model.generate(
+                images,
+                sos_idx=vocab.sos_idx,
+                eos_idx=vocab.eos_idx,
+                max_len=config.data.max_seq_len,
+            )
+            for i in range(preds.size(0)):
+                pred_str = vocab.decode(preds[i].cpu().tolist())
+                tgt_str = batch['latex'][i]
+                all_predictions.append(pred_str)
+                all_targets.append(tgt_str)
+            num_generated += images.size(0)
 
-        # Decode predictions and targets
-        for i in range(preds.size(0)):
-            pred_str = vocab.decode(preds[i].cpu().tolist())
-            tgt_str = batch['latex'][i]
-            all_predictions.append(pred_str)
-            all_targets.append(tgt_str)
-
-        # Save some images and paths for visualization
-        if len(all_images) < 16:
-            all_images.append(images.cpu().numpy())
-            all_image_paths.extend(batch['image_path'])
-
-    # Compute metrics
-    exprate_metrics = compute_exprate(all_predictions, all_targets)
-    bleu_metrics = compute_bleu(all_predictions, all_targets)
-    token_acc = compute_token_accuracy(all_predictions, all_targets)
+            if len(all_images) < 16:
+                all_images.append(images.cpu().numpy())
+                all_image_paths.extend(batch['image_path'])
 
     metrics = {
         'val_loss': total_loss / max(num_batches, 1),
-        **exprate_metrics,
-        **bleu_metrics,
-        'token_accuracy': token_acc,
     }
 
-    # Collect images for visualization
+    if run_generate and all_predictions:
+        exprate_metrics = compute_exprate(all_predictions, all_targets)
+        bleu_metrics = compute_bleu(all_predictions, all_targets)
+        token_acc = compute_token_accuracy(all_predictions, all_targets)
+        metrics.update(exprate_metrics)
+        metrics.update(bleu_metrics)
+        metrics['token_accuracy'] = token_acc
+
+    vis_images = None
     if all_images:
         vis_images = np.concatenate(all_images, axis=0)[:16]
-    else:
-        vis_images = None
 
     return metrics, all_predictions[:16], all_targets[:16], vis_images, all_image_paths[:16]
 
@@ -537,37 +543,48 @@ def main():
 
         # Calibrate BN before validation — resets running stats and recomputes
         # from training data so eval mode matches train mode exactly.
-        _calibrate_bn(model, train_loader, config)
+        _calibrate_bn(model, train_loader, config,
+                       num_batches=config.train.bn_calibrate_batches)
 
-        # Validate
+        # Validate — run generate() only every N epochs (expensive O(T^2) decode)
+        gen_every = config.train.val_generate_every
+        is_generate_epoch = (
+            epoch % gen_every == 0
+            or epoch == config.train.epochs
+            or epoch <= 1
+            or args.overfit_test
+        )
         val_metrics, val_preds, val_targets, val_images, val_paths = validate(
-            model, val_loader, vocab, criterion, config
+            model, val_loader, vocab, criterion, config,
+            run_generate=is_generate_epoch,
         )
 
         epoch_time = time.time() - epoch_start
 
-        # Step plateau scheduler based on val ExpRate
+        # Step plateau scheduler based on val loss when ExpRate not available
         if plateau_scheduler is not None:
-            plateau_scheduler.step(val_metrics['exprate'])
+            if 'exprate' in val_metrics:
+                plateau_scheduler.step(val_metrics['exprate'])
+            else:
+                # Use negative val_loss as proxy (lower loss = better)
+                plateau_scheduler.step(-val_metrics['val_loss'])
 
-        # Record history
+        # Record history — fill missing metrics with last known value
         history['train_loss'].append(train_loss)
         history['train_ce_loss'].append(train_ce_loss)
         history['train_ctc_loss'].append(train_ctc_loss)
         history['train_cnt_loss'].append(train_cnt_loss)
         history['val_loss'].append(val_metrics['val_loss'])
-        history['exprate'].append(val_metrics['exprate'])
-        history['exprate_1'].append(val_metrics['exprate_1'])
-        history['exprate_2'].append(val_metrics['exprate_2'])
-        history['bleu'].append(val_metrics['bleu'])
-        history['bleu_1'].append(val_metrics.get('bleu_1', 0))
-        history['bleu_4'].append(val_metrics.get('bleu_4', 0))
-        history['token_accuracy'].append(val_metrics['token_accuracy'])
+        history['exprate'].append(val_metrics.get('exprate', history['exprate'][-1] if history['exprate'] else 0))
+        history['exprate_1'].append(val_metrics.get('exprate_1', history['exprate_1'][-1] if history['exprate_1'] else 0))
+        history['exprate_2'].append(val_metrics.get('exprate_2', history['exprate_2'][-1] if history['exprate_2'] else 0))
+        history['bleu'].append(val_metrics.get('bleu', history['bleu'][-1] if history['bleu'] else 0))
+        history['bleu_1'].append(val_metrics.get('bleu_1', history['bleu_1'][-1] if history['bleu_1'] else 0))
+        history['bleu_4'].append(val_metrics.get('bleu_4', history['bleu_4'][-1] if history['bleu_4'] else 0))
+        history['token_accuracy'].append(val_metrics.get('token_accuracy', history['token_accuracy'][-1] if history['token_accuracy'] else 0))
         history['lr'].append(scheduler.get_last_lr()[0])
 
         # Print epoch summary
-        # Recompute ctc_w here (mirrors the ramp logic inside train_one_epoch)
-        # so the printed weight matches what was actually used this epoch.
         if config.train.ctc_weight > 0 and config.train.ctc_warmup_epochs > 0:
             ctc_w = config.train.ctc_weight * min(1.0, epoch / config.train.ctc_warmup_epochs)
         else:
@@ -575,31 +592,36 @@ def main():
         ctc_str = f"\n  CTC Loss:   {train_ctc_loss:.4f} (weight={ctc_w:.3f})" if config.train.ctc_weight > 0 else ""
         cnt_str = f"\n  Count Loss: {train_cnt_loss:.4f}" if config.train.counting_weight > 0 else ""
         aug_str = f"\n  Aug prob:   {aug_prob:.2f}" if config.data.augment else ""
+
+        if is_generate_epoch:
+            metric_str = (
+                f"\n  ExpRate:    {val_metrics['exprate']:.2f}% "
+                f"(+1: {val_metrics['exprate_1']:.2f}%, +2: {val_metrics['exprate_2']:.2f}%)"
+                f"\n  BLEU-4:     {val_metrics['bleu']:.2f}%"
+                f"\n  Token Acc:  {val_metrics['token_accuracy']:.2f}%"
+            )
+        else:
+            metric_str = "\n  [generation skipped — loss only]"
+
         print(
             f"\nEpoch {epoch}/{config.train.epochs} ({epoch_time:.1f}s)"
             f"\n  Train Loss: {train_loss:.4f} (CE: {train_ce_loss:.4f}{ctc_str}{cnt_str})"
             f"\n  Val Loss:   {val_metrics['val_loss']:.4f}"
-            f"\n  ExpRate:    {val_metrics['exprate']:.2f}% "
-            f"(±1: {val_metrics['exprate_1']:.2f}%, ±2: {val_metrics['exprate_2']:.2f}%)"
-            f"\n  BLEU-4:     {val_metrics['bleu']:.2f}%"
-            f"\n  Token Acc:  {val_metrics['token_accuracy']:.2f}%"
+            f"{metric_str}"
             f"\n  LR:         {scheduler.get_last_lr()[0]:.2e}"
             f"{aug_str}"
         )
 
-        # Print some sample predictions
-        n_show = min(3, len(val_preds))
-        print(f"\n  Sample predictions:")
-        for i in range(n_show):
-            match = "OK" if val_preds[i].strip() == val_targets[i].strip() else "XX"
-            print(f"    {match} GT:   {val_targets[i][:60]}")
-            print(f"      Pred: {val_preds[i][:60]}")
+        # Print sample predictions (only on generate epochs)
+        if is_generate_epoch and val_preds:
+            n_show = min(3, len(val_preds))
+            print(f"\n  Sample predictions:")
+            for i in range(n_show):
+                match = "OK" if val_preds[i].strip() == val_targets[i].strip() else "XX"
+                print(f"    {match} GT:   {val_targets[i][:60]}")
+                print(f"      Pred: {val_preds[i][:60]}")
 
         # --- Detect LR restart and apply grace period ---
-        # A cosine restart causes a transient regression before the model
-        # recovers (run 3 ep56: -5.3pp). Penalising with the patience counter
-        # causes premature early stopping before recovery is complete.
-        # Detection: LR only increases between epochs at a cycle boundary.
         current_lr = scheduler.get_last_lr()[0]
         is_restart_epoch = (
             prev_epoch_end_lr is not None and current_lr > prev_epoch_end_lr * 1.5
@@ -612,16 +634,18 @@ def main():
         if restart_grace_remaining > 0:
             restart_grace_remaining -= 1
 
-        # Checkpointing
-        is_best = val_metrics['exprate'] > best_exprate
-        if is_best:
-            best_exprate = val_metrics['exprate']
-            epochs_without_improvement = 0
-        elif restart_grace_remaining > 0:
-            # Within grace period: transient restart regression, don't penalise
-            pass
-        else:
-            epochs_without_improvement += 1
+        # Checkpointing — use ExpRate when available, skip on loss-only epochs
+        is_best = False
+        current_exprate = val_metrics.get('exprate', None)
+        if current_exprate is not None:
+            is_best = current_exprate > best_exprate
+            if is_best:
+                best_exprate = current_exprate
+                epochs_without_improvement = 0
+            elif restart_grace_remaining > 0:
+                pass
+            else:
+                epochs_without_improvement += 1
 
         checkpoint = {
             'epoch': epoch,

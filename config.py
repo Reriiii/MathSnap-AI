@@ -23,7 +23,7 @@ class DataConfig:
     max_seq_len: int = 200
 
     # DataLoader
-    batch_size: int = 48
+    batch_size: int = 32
     num_workers: int = 8
     pin_memory: bool = True
 
@@ -65,10 +65,10 @@ class EncoderConfig:
 @dataclass
 class DecoderConfig:
     """CoMER Transformer decoder configuration."""
-    d_model: int = 512
-    nhead: int = 8
-    num_layers: int = 6
-    dim_feedforward: int = 2048
+    d_model: int = 256
+    nhead: int = 4
+    num_layers: int = 3
+    dim_feedforward: int = 1024
     dropout: float = 0.3
     max_seq_len: int = 200
     # ARM (Attention Refinement Module) — CoMER ECCV 2022
@@ -79,13 +79,13 @@ class DecoderConfig:
     # Multi-scale counting common channel dim (CAN, ECCV 2022)
     counting_common_channels: int = 128
     # Bidirectional training (BTTR, ICCV 2021)
-    bidirectional: bool = True
+    bidirectional: bool = False
 
 
 @dataclass
 class TrainConfig:
     """Training configuration."""
-    epochs: int = 200
+    epochs: int = 100
     lr: float = 2e-4
     min_lr: float = 1e-7
     weight_decay: float = 1e-4
@@ -148,6 +148,15 @@ class TrainConfig:
 
     # Beam search
     beam_size: int = 5
+
+    # Validation frequency: run expensive generate() every N epochs.
+    # Val loss (teacher-forcing) is computed every epoch regardless.
+    val_generate_every: int = 10
+    # Max samples for generation during validation (0 = all).
+    # 0 = generate ALL val samples for comprehensive evaluation.
+    val_generate_max_samples: int = 0
+    # BN calibration batches before validation
+    bn_calibrate_batches: int = 30
 
 
 @dataclass

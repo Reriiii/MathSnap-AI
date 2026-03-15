@@ -3,7 +3,9 @@
     "allow": [
       "Read(//d/Workplace/hmer/**)",
       "Bash(python -c \":*)",
-      "Bash(python train.py --overfit_test --num_samples 10 --epochs 50)"
+      "Bash(python train.py --overfit_test --num_samples 10 --epochs 50)",
+      "Bash(python -c \"import train; print\\(''OK''\\)\")",
+      "Bash(python train.py --epochs 6)"
     ]
   }
 }
