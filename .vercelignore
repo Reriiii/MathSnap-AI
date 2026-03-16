@@ -1,0 +1,24 @@
+# Python / Backend
+backend/
+deployment/
+checkpoints/
+dataset/
+models/
+data/
+outputs/
+.venv/
+__pycache__/
+*.py
+*.pt
+*.pth
+
+# Large/unnecessary files
+*.woff
+*.woff2
+*.ttf
+*.otf
+
+# Dev files
+.claude/
+.git/
+.env

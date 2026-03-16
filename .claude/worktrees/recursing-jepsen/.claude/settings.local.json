@@ -46,7 +46,12 @@
       "Read(//d D:/Workplace/hmer/**)",
       "Bash(dir)",
       "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" node_modules/vite/bin/vite.js build)",
-      "Bash(python deployment/huggingface/setup_hf_space.py)"
+      "Bash(python deployment/huggingface/setup_hf_space.py)",
+      "WebFetch(domain:vercel.com)",
+      "Bash(vercel logs:*)",
+      "Bash(find D:/Workplace/hmer -name train.py -o -name training*.py)",
+      "Bash(find D:/Workplace/hmer/data -type f -name *.py)",
+      "Bash(grep -E \"\\\\.tsx?$\")"
     ]
   }
 }
