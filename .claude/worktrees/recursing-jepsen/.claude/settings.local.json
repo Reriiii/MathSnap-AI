@@ -26,7 +26,27 @@
       "Bash(curl -s --connect-timeout 5 --max-time 10 http://localhost:4173/)",
       "Bash(curl -s --max-time 5 http://localhost:4173/)",
       "Bash(ls -la /d/Workplace/hmer/src/app/components/*.tsx)",
-      "Bash(grep -page)"
+      "Bash(grep -page)",
+      "Bash(wc -l /d/Workplace/hmer/dataset/processed/*.csv)",
+      "Bash(python3 -c \"import json; vocab = json.load\\(open\\(''/d/Workplace/hmer/dataset/processed/vocab_comer.json''\\)\\); print\\(f''Total tokens: {len\\(vocab[\"\"token2idx\"\"]\\)}''\\)\")",
+      "Bash(ls -1 /d/Workplace/hmer/src/app/components/ui/*.tsx)",
+      "Bash(xargs -I {} basename {})",
+      "Bash(grep -l \"recharts\\\\|chart\" /d/Workplace/hmer/src/app/components/ui/*.tsx)",
+      "Bash(python3:*)",
+      "Bash(grep -r \"loss\\\\|accuracy\\\\|ExpRate\\\\|WER\" /d/Workplace/hmer --include=*.py --include=*.json ! -path */node_modules/* ! -path */.git/* ! -path */.venv/*)",
+      "Bash(find D:/Workplace/hmer -type f \\\\\\(-name *.log -o -name *.txt -o -name *metrics* -o -name *stats* -o -name *results* \\\\\\))",
+      "Bash(find D:/Workplace/hmer -type f -name *.json ! -path */node_modules/*)",
+      "Bash(ls -la D:/Workplace/hmer/*.py)",
+      "Bash(grep -r \"ExpRate\\\\|loss\\\\|epoch\\\\|metrics\" D:/Workplace/hmer --include=*.py --include=*.txt --include=*.log)",
+      "Bash(find D:/Workplace/hmer -maxdepth 3 -type f -name *.py ! -path */.venv/* ! -path */node_modules/* ! -path */__pycache__/*)",
+      "Bash(python backend/analyze_dataset.py)",
+      "Bash(npx tsc:*)",
+      "Bash(node node_modules/vite/bin/vite.js build)",
+      "Bash(find D:Workplacehmersrcstyles -type f -name *.css -o -name *.scss)",
+      "Read(//d D:/Workplace/hmer/**)",
+      "Bash(dir)",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" node_modules/vite/bin/vite.js build)",
+      "Bash(python deployment/huggingface/setup_hf_space.py)"
     ]
   }
 }
