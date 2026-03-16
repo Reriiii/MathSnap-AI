@@ -1,17 +1,19 @@
 import { Button } from "@/app/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/app/components/ui/card";
 import { Badge } from "@/app/components/ui/badge";
-import { 
-  Wand2, 
-  FolderPlus, 
-  FileCheck, 
-  FolderOpen, 
+import {
+  Wand2,
+  FolderPlus,
+  FileCheck,
+  FolderOpen,
   AlertCircle,
   MessageSquare,
   TrendingUp,
   Copy,
   ExternalLink
 } from "lucide-react";
+import { LatexPreview } from "@/app/components/latex-preview";
+import { toast } from "sonner";
 
 interface DashboardPageProps {
   onNavigate: (page: string) => void;
@@ -138,7 +140,7 @@ export function DashboardPage({ onNavigate, onNewConvert }: DashboardPageProps) 
               <Wand2 className="h-4 w-4 mr-2" />
               New Convert
             </Button>
-            <Button variant="outline" onClick={() => onNavigate("projects")}>
+            <Button variant="outline" onClick={() => toast.info("Projects coming soon!")}>
               <FolderPlus className="h-4 w-4 mr-2" />
               New Project
             </Button>
@@ -172,7 +174,7 @@ export function DashboardPage({ onNavigate, onNewConvert }: DashboardPageProps) 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Recent Activity</CardTitle>
-            <Button variant="ghost" size="sm" onClick={() => onNavigate("history")}>
+            <Button variant="ghost" size="sm" onClick={() => toast.info("History page coming soon!")}>
               View All
             </Button>
           </CardHeader>
@@ -183,16 +185,16 @@ export function DashboardPage({ onNavigate, onNewConvert }: DashboardPageProps) 
                   key={item.id}
                   className="flex items-center gap-4 p-3 rounded-lg hover:bg-muted/50 transition-colors"
                 >
-                  {/* Thumbnail */}
-                  <div className="flex-shrink-0 w-16 h-16 bg-muted rounded-lg flex items-center justify-center">
-                    <code className="text-xs font-mono">{item.thumbnail}</code>
+                  {/* Thumbnail — KaTeX render */}
+                  <div className="flex-shrink-0 w-16 h-16 bg-muted rounded-lg flex items-center justify-center overflow-hidden p-1">
+                    <LatexPreview latex={item.formula} displayMode={false} className="text-[8px] scale-[0.55] origin-center" />
                   </div>
 
                   {/* Content */}
                   <div className="flex-1 min-w-0">
-                    <code className="text-sm font-mono block truncate mb-1">
-                      {item.formula}
-                    </code>
+                    <div className="mb-1 max-h-6 overflow-hidden">
+                      <LatexPreview latex={item.formula} displayMode={false} className="text-sm" />
+                    </div>
                     <div className="flex items-center gap-2">
                       <Badge variant="outline" className={getStatusColor(item.status)}>
                         {item.status}
@@ -220,7 +222,7 @@ export function DashboardPage({ onNavigate, onNewConvert }: DashboardPageProps) 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Projects</CardTitle>
-            <Button variant="ghost" size="sm" onClick={() => onNavigate("projects")}>
+            <Button variant="ghost" size="sm" onClick={() => toast.info("Projects page coming soon!")}>
               View All
             </Button>
           </CardHeader>
@@ -257,7 +259,7 @@ export function DashboardPage({ onNavigate, onNewConvert }: DashboardPageProps) 
                       <span className="text-xs text-muted-foreground">
                         {project.lastEdited}
                       </span>
-                      <Button size="sm" variant="outline" onClick={() => onNavigate("projects")}>
+                      <Button size="sm" variant="outline" onClick={() => toast.info("Projects coming soon!")}>
                         Continue
                       </Button>
                     </div>

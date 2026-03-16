@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { Header } from "@/app/components/header";
 import { HomePage } from "@/app/components/home-page";
 import { DashboardPage } from "@/app/components/dashboard-page";
@@ -11,7 +12,6 @@ export default function App() {
 
   const handleNavigate = (page: string) => {
     setCurrentPage(page);
-    // Scroll to top on navigation
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -28,16 +28,8 @@ export default function App() {
         return <DashboardPage onNavigate={handleNavigate} onNewConvert={handleNewConvert} />;
       case "convert":
         return <ConvertPage />;
-      case "projects":
-        return <ProjectsPage onNavigate={handleNavigate} />;
-      case "history":
-        return <HistoryPage onNavigate={handleNavigate} />;
-      case "templates":
-        return <TemplatesPage onNavigate={handleNavigate} />;
       case "settings":
         return <SettingsPage />;
-      case "help":
-        return <HelpPage />;
       default:
         return <HomePage onNavigate={handleNavigate} onNewConvert={handleNewConvert} />;
     }
@@ -45,15 +37,25 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-background">
-      <Header 
-        currentPage={currentPage} 
+      <Header
+        currentPage={currentPage}
         onNavigate={handleNavigate}
         onNewConvert={handleNewConvert}
       />
       <main className="w-full">
-        {renderPage()}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={currentPage}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+          >
+            {renderPage()}
+          </motion.div>
+        </AnimatePresence>
       </main>
-      <Toaster />
+      <Toaster richColors position="top-right" />
     </div>
   );
 }

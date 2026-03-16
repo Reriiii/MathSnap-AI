@@ -12,9 +12,13 @@ import {
   SelectValue,
 } from "@/app/components/ui/select";
 import { Avatar, AvatarFallback } from "@/app/components/ui/avatar";
-import { User, Mail, Save } from "lucide-react";
+import { User, Mail, Save, Sun, Moon, Monitor } from "lucide-react";
+import { useTheme } from "next-themes";
+import { toast } from "sonner";
 
 export function SettingsPage() {
+  const { theme, setTheme } = useTheme();
+
   return (
     <div className="min-h-screen pb-20 md:pb-0">
       <div className="container mx-auto px-4 lg:px-6 py-6 lg:py-8 space-y-6">
@@ -29,6 +33,35 @@ export function SettingsPage() {
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Main Settings */}
           <div className="lg:col-span-2 space-y-6">
+            {/* Theme */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Appearance</CardTitle>
+                <CardDescription>Choose your preferred theme</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { value: "light", label: "Light", icon: Sun },
+                    { value: "dark", label: "Dark", icon: Moon },
+                    { value: "system", label: "System", icon: Monitor },
+                  ].map((opt) => (
+                    <Button
+                      key={opt.value}
+                      variant={theme === opt.value ? "default" : "outline"}
+                      className={`flex flex-col gap-1.5 h-auto py-3 ${
+                        theme === opt.value ? "bg-primary text-primary-foreground" : ""
+                      }`}
+                      onClick={() => setTheme(opt.value)}
+                    >
+                      <opt.icon className="h-5 w-5" />
+                      <span className="text-xs">{opt.label}</span>
+                    </Button>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Profile */}
             <Card>
               <CardHeader>
@@ -73,7 +106,10 @@ export function SettingsPage() {
                   />
                 </div>
 
-                <Button className="bg-primary text-primary-foreground">
+                <Button
+                  className="bg-primary text-primary-foreground"
+                  onClick={() => toast.success("Settings saved!")}
+                >
                   <Save className="h-4 w-4 mr-2" />
                   Save Changes
                 </Button>

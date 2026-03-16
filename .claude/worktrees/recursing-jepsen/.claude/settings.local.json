@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(pip install:*)",
+      "Bash(python backend/main.py)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s -X POST http://localhost:8000/predict -F \"file=@D:/Workplace/hmer/test_input.png\")",
+      "Bash(npx vite:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npm --version)",
+      "Bash(where node:*)",
+      "Bash(where npx:*)",
+      "Read(//c/Program Files/nodejs//**)",
+      "Bash(npm install:*)",
+      "Bash(ls D:/Workplace/hmer/.claude/worktrees/recursing-jepsen/node_modules/.bin/vite*)",
+      "Bash(curl -s http://localhost:5173/src/main.tsx)",
+      "Bash(taskkill //F //IM node.exe)",
+      "Bash(curl -s --max-time 3 http://localhost:5173/)",
+      "Bash(curl -s --connect-timeout 3 --max-time 5 http://localhost:3000/)",
+      "Bash(curl -v --connect-timeout 3 --max-time 5 http://127.0.0.1:3000/)",
+      "Bash(node node_modules/vite/bin/vite.js --port 3000)",
+      "Bash(curl -v --connect-timeout 5 --max-time 10 http://127.0.0.1:3000/)",
+      "Bash(curl -v --connect-timeout 5 --max-time 10 http://localhost:3000/)",
+      "Bash(node node_modules/vite/bin/vite.js preview --port 4173)",
+      "Bash(curl -s --connect-timeout 5 --max-time 10 http://localhost:4173/)",
+      "Bash(curl -s --max-time 5 http://localhost:4173/)",
+      "Bash(ls -la /d/Workplace/hmer/src/app/components/*.tsx)",
+      "Bash(grep -page)"
+    ]
+  }
+}
