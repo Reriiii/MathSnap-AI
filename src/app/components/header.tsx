@@ -55,8 +55,8 @@ export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
           </div>
         </div>
 
-        {/* Desktop Navigation */}
-        <nav className="hidden lg:flex items-center gap-1">
+        {/* Desktop + Tablet Navigation */}
+        <nav className="hidden md:flex items-center gap-1">
           {navItems.map((item) => (
             <Button
               key={item.id}
@@ -64,13 +64,13 @@ export function Header({ currentPage, onNavigate, onNewConvert }: HeaderProps) {
               size="sm"
               onClick={() => onNavigate(item.id)}
               className={cn(
-                "gap-2 h-8 text-xs",
+                "gap-1.5 h-8 text-xs",
                 currentPage === item.id &&
                   "bg-primary text-primary-foreground"
               )}
             >
               <item.icon className="h-3.5 w-3.5" />
-              {item.label}
+              <span className="hidden lg:inline">{item.label}</span>
             </Button>
           ))}
         </nav>

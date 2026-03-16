@@ -18,7 +18,7 @@ export function HomePage({ onNavigate, onNewConvert }: HomePageProps) {
   ];
 
   const features = [
-    { icon: CheckCircle, title: "CoMER Model", description: "Transformer-based architecture with attention refinement for accurate recognition" },
+    { icon: CheckCircle, title: "Mini-CoMER", description: "Transformer-based architecture with attention refinement for accurate recognition" },
     { icon: Zap, title: "Instant Results", description: "Get LaTeX code in under a second with GPU-accelerated inference" },
     { icon: Shield, title: "Local Processing", description: "All processing happens on your machine — no data leaves your device" },
   ];
