@@ -1,6 +1,7 @@
 """
-ICAL decoder with SCCM (Self-Checking Counting Module) and FusionModule.
-Copied from: https://github.com/qingzhenduyu/ICAL
+CoMER decoder: Transformer with ARM (Attention Refinement Module).
+Based on: https://github.com/Green-Wood/CoMER
+Stripped from ICAL: removed SCCM, FusionModule, implicit/fusion heads.
 """
 from typing import List
 
@@ -78,13 +79,9 @@ class Decoder(nn.Module):
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
         )
-        self.SCCM = SCCM(d_model)
-        self.fusion = FusionModule(d_model)
-        self.exp_proj = nn.Linear(d_model, vocab_size)
-        self.imp_proj = nn.Sequential(
-            nn.ReLU(), nn.Linear(d_model, vocab_size))
-        self.fusion_proj = nn.Sequential(
-            nn.ReLU(inplace=True), nn.Linear(d_model, vocab_size))
+
+        # Single projection head (CoMER)
+        self.proj = nn.Linear(d_model, vocab_size)
 
     def _build_attention_mask(self, length, device):
         mask = torch.full(
@@ -96,21 +93,16 @@ class Decoder(nn.Module):
     def forward(
         self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
     ) -> FloatTensor:
-        """generate output for tgt
-
+        """
         Parameters
         ----------
-        src : FloatTensor
-            [b, h, w, d]
-        src_mask: LongTensor
-            [b, h, w]
-        tgt : LongTensor
-            [b, l]
+        src : FloatTensor [b, h, w, d]
+        src_mask: LongTensor [b, h, w]
+        tgt : LongTensor [b, l]
 
         Returns
         -------
-        Tuple of FloatTensor
-            exp_out [b, l, vocab_size], imp_out [b, l, vocab_size], fusion_out [b, l, vocab_size]
+        FloatTensor [b, l, vocab_size]
         """
         _, l = tgt.size()
         tgt_mask = self._build_attention_mask(l, tgt.device)
@@ -134,84 +126,14 @@ class Decoder(nn.Module):
             memory_key_padding_mask=src_mask,
         )
 
-        exp_out = rearrange(out, "l b d -> b l d")
-        imp_out = self.SCCM(exp_out, tgt_mask, tgt_pad_mask)
+        out = rearrange(out, "l b d -> b l d")
+        out = self.proj(out)
 
-        fusion_out = self.fusion(exp_out, imp_out)
-        exp_out = self.exp_proj(exp_out)
-        imp_out = self.imp_proj(imp_out)
-        fusion_out = self.fusion_proj(fusion_out)
-
-        return exp_out, imp_out, fusion_out
+        return out
 
     def transform(
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
-        """For beam search: run forward and return fusion logits."""
+        """For beam search: run forward and return logits."""
         assert len(src) == 1 and len(src_mask) == 1
-        exp_out, imp_out, fusion_out = self(src[0], src_mask[0], input_ids)
-        return fusion_out
-
-
-class SCCM(nn.Module):
-    """Self-Checking Counting Module from ICAL."""
-    def __init__(self, d_model):
-        super().__init__()
-        self.te = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model, nhead=8, dim_feedforward=1024, dropout=0.3,
-            ),
-            num_layers=1,
-        )
-
-    def forward(self, out: FloatTensor, tgt_mask: LongTensor, src_key_padding_mask: LongTensor):
-        """generate implicit logits
-
-        Parameters
-        ----------
-        out : FloatTensor
-            [b, l, d]
-        tgt_mask: LongTensor
-            [l, l]
-        src_key_padding_mask: LongTensor
-            [b, l]
-        Returns
-        -------
-        FloatTensor
-            [b, l, d]
-        """
-        out = rearrange(out, "b t d -> t b d")
-        out = self.te(
-            src=out, mask=tgt_mask, src_key_padding_mask=src_key_padding_mask
-        )
-        out = rearrange(out, "t b d -> b t d")
-
-        return out
-
-
-class FusionModule(nn.Module):
-    """Sigmoid-gated fusion of explicit and implicit features."""
-    def __init__(self, d_model: int):
-        super(FusionModule, self).__init__()
-        self.d_model = d_model
-        self.w_att = nn.Linear(2 * d_model, d_model)
-
-    def forward(self, e_feature: FloatTensor, i_feature: FloatTensor):
-        """generate output fusing e_feature & i_feature
-
-        Parameters
-        ----------
-        e_feature : FloatTensor
-            [b, l, d]
-        i_feature: FloatTensor
-            [b, l, d]
-
-        Returns
-        -------
-        FloatTensor
-            [b, l, d]
-        """
-        f = torch.cat((e_feature, i_feature), dim=2)
-        f_att = torch.sigmoid(self.w_att(f))
-        output = f_att * i_feature + (1 - f_att) * e_feature
-        return output
+        return self(src[0], src_mask[0], input_ids)

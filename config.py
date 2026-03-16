@@ -1,7 +1,7 @@
 """
-Configuration for ICAL HMER pipeline.
-Architecture copied from: https://github.com/qingzhenduyu/ICAL
-Hyperparams adapted for single-GPU (RTX 5060 Ti 16GB).
+Configuration for CoMER HMER pipeline.
+Based on: https://github.com/Green-Wood/CoMER
+Adapted for single-GPU (RTX 5060 Ti 16GB).
 """
 
 import os
@@ -12,31 +12,33 @@ from typing import Tuple
 @dataclass
 class DataConfig:
     """Data and preprocessing configuration."""
+    # CoMER dataset directory
+    comer_data_dir: str = "D:/Workplace/CoMER/data"
+
+    # Legacy paths (for CSV format fallback)
     raw_dir: str = "dataset/raw"
     processed_dir: str = "dataset/processed"
-    vocab_path: str = "dataset/processed/vocab.json"
 
-    # Image settings — ICAL uses variable size with limits
-    img_height: int = 128       # target resize height (used in dataset)
-    img_max_width: int = 512    # safety cap
+    # Vocab
+    vocab_path: str = "dataset/processed/vocab_comer.json"
+
+    # Image settings — reduced for fast training on single GPU
     img_channels: int = 1       # grayscale
-
-    # ICAL ScaleToLimitRange bounds
     h_lo: int = 16
-    h_hi: int = 256
+    h_hi: int = 128
     w_lo: int = 16
-    w_hi: int = 1024
+    w_hi: int = 512
 
     # Sequence settings
     max_seq_len: int = 200
 
-    # DataLoader — ICAL uses pre-grouped batching by image area
-    batch_size: int = 8         # per-GPU batch (ICAL default)
-    max_batch_pixels: int = 320000  # max_size in ICAL
-    num_workers: int = 5
+    # DataLoader — small images, large batches
+    batch_size: int = 64
+    max_batch_pixels: int = 4_000_000
+    num_workers: int = 4        # pipeline CPU preprocessing with GPU compute
     pin_memory: bool = True
 
-    # Augmentation — ICAL uses only scale augmentation
+    # Augmentation
     augment: bool = True
     scale_aug: bool = True      # ScaleAugmentation(0.7, 1.4)
     scale_lo: float = 0.7
@@ -45,7 +47,7 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    """ICAL model configuration (encoder + decoder)."""
+    """CoMER model configuration (encoder + decoder)."""
     # Shared
     d_model: int = 256
 
@@ -74,25 +76,21 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    """Training configuration — matches ICAL."""
-    epochs: int = 250
+    """Training configuration."""
+    epochs: int = 300          # CoMER default
 
-    # ICAL uses SGD(lr=0.08, momentum=0.9, weight_decay=1e-4) on 4 GPUs.
-    # Single GPU: scale down lr by 4x (linear scaling rule).
-    optimizer: str = "sgd"
-    lr: float = 0.02            # 0.08 / 4 (1 GPU vs 4 GPUs)
-    momentum: float = 0.9
+    # Adam (CoMER original uses SGD 0.08 with 4 GPUs DDP)
+    # Adam 1e-4 is more stable for single GPU training
+    optimizer: str = "adam"
+    lr: float = 1e-4
     weight_decay: float = 1e-4
 
     # LR scheduler: ReduceLROnPlateau on val_ExpRate
-    patience: int = 20
-    lr_factor: float = 0.25     # multiply LR by this on plateau
+    patience: int = 10
+    lr_factor: float = 0.5     # multiply LR by this on plateau
 
-    # Validation frequency — ICAL uses check_val_every_n_epoch=2
-    val_every_n_epoch: int = 2
-
-    # Dynamic weight for implicit loss (ICAL default: True)
-    dynamic_weight: bool = True
+    # Validation frequency
+    val_every_n_epoch: int = 1
 
     # Gradient clipping
     grad_clip: float = 5.0

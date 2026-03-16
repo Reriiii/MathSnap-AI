@@ -1,27 +1,32 @@
 """
-CROHME dataset for ICAL HMER.
+CROHME dataset for CoMER HMER.
 
-Loads image-LaTeX pairs from CSV files. Uses ICAL-style:
-- No pre-padding: images are resized, collate_fn pads per-batch
-- ScaleAugmentation(0.7, 1.4) for training augmentation
-- SizeGroupedBatchSampler for efficient batching
+Supports two formats:
+- CoMER: caption.txt (tab-separated: image_id<TAB>token1 token2 ...) + img/ folder with BMP files
+- CSV: image_path,latex (legacy format)
+
+Pipeline:
+- Variable image sizes (preserve natural aspect ratio)
+- ScaleAugmentation(0.7, 1.4) + ScaleToLimitRange for training
+- SizeGroupedBatchSampler: group similar-sized images -> minimal padding
+- collate_fn: dynamic per-batch padding
 """
 
+import os
 import csv
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import cv2
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from PIL import Image
-import torchvision.transforms as T
 
 from data.vocab import Vocab
 
 
 class ScaleAugmentation:
-    """ICAL-style scale augmentation."""
+    """Scale augmentation: random resize by factor in [lo, hi]."""
     def __init__(self, lo: float = 0.7, hi: float = 1.4):
         self.lo = lo
         self.hi = hi
@@ -33,7 +38,7 @@ class ScaleAugmentation:
 
 
 class ScaleToLimitRange:
-    """ICAL-style: ensure image fits within (h_lo..h_hi, w_lo..w_hi)."""
+    """Ensure image fits within (h_lo..h_hi, w_lo..w_hi)."""
     def __init__(self, w_lo: int = 16, w_hi: int = 1024, h_lo: int = 16, h_hi: int = 256):
         self.w_lo = w_lo
         self.w_hi = w_hi
@@ -58,16 +63,15 @@ class ScaleToLimitRange:
 
 class SizeGroupedBatchSampler(Sampler):
     """
-    Pre-grouped batch sampler (ICAL-style).
-    Sorts samples by image area, groups similarly-sized images.
-    Batch ORDER is shuffled each epoch.
+    Batch sampler that groups similar-sized images.
+    Sorts by image area, groups into batches respecting pixel budget.
     """
 
     def __init__(
         self,
         dataset,
         batch_size: int,
-        max_pixels: int = 320000,
+        max_pixels: int = 2_000_000,
         shuffle: bool = True,
         drop_last: bool = False,
     ):
@@ -78,18 +82,9 @@ class SizeGroupedBatchSampler(Sampler):
         self.drop_last = drop_last
         self.batches = self._build_batches()
 
-    def _get_image_area(self, idx: int) -> int:
-        entry = self.dataset.entries[idx]
-        try:
-            with Image.open(entry['image_path']) as img:
-                w, h = img.size
-            return h * w
-        except Exception:
-            return 256 * 1024  # fallback
-
     def _build_batches(self):
         n = len(self.dataset)
-        areas = [(i, self._get_image_area(i)) for i in range(n)]
+        areas = [(i, self.dataset.get_image_area(i)) for i in range(n)]
         areas.sort(key=lambda x: x[1])
 
         batches = []
@@ -128,13 +123,15 @@ class SizeGroupedBatchSampler(Sampler):
 
 class CROHMEDataset(Dataset):
     """
-    CROHME dataset for ICAL HMER.
-    Returns variable-size images (no pre-padding) and raw label indices (no SOS/EOS).
+    CROHME dataset with variable image sizes.
+
+    Supports:
+    - CoMER format: caption_path + img_dir (BMP files, caption.txt)
+    - CSV format: csv_path with image_path,latex columns
     """
 
     def __init__(
         self,
-        csv_path: str,
         vocab: Vocab,
         max_seq_len: int = 200,
         augment: bool = False,
@@ -145,30 +142,118 @@ class CROHMEDataset(Dataset):
         h_hi: int = 256,
         w_lo: int = 16,
         w_hi: int = 1024,
+        # CoMER format
+        caption_path: Optional[str] = None,
+        img_dir: Optional[str] = None,
+        # CSV format (legacy)
+        csv_path: Optional[str] = None,
     ):
         self.vocab = vocab
         self.max_seq_len = max_seq_len
         self.augment = augment
 
-        # Build transforms (ICAL-style)
-        trans_list = []
+        self.scale_aug = None
         if augment and scale_aug:
-            trans_list.append(ScaleAugmentation(scale_lo, scale_hi))
-        trans_list.append(ScaleToLimitRange(w_lo=w_lo, w_hi=w_hi, h_lo=h_lo, h_hi=h_hi))
-        trans_list.append(T.ToTensor())  # [0, 1] range
-        self.transform = T.Compose(trans_list)
+            self.scale_aug = ScaleAugmentation(scale_lo, scale_hi)
+
+        self.scale_limit = ScaleToLimitRange(w_lo, w_hi, h_lo, h_hi)
 
         # Load data entries
         self.entries = []
+
+        if caption_path is not None and img_dir is not None:
+            # CoMER format: caption.txt + img/ directory
+            self._load_comer_format(caption_path, img_dir)
+        elif csv_path is not None:
+            # Legacy CSV format
+            self._load_csv_format(csv_path)
+        else:
+            raise ValueError("Must provide either (caption_path, img_dir) or csv_path")
+
+        self._image_areas = None
+
+        # Pre-load all images into RAM (8834 BMP ~ 200MB in numpy)
+        self._image_cache = {}
+        self._preload_images()
+
+        print(f"Loaded {len(self.entries)} samples ({len(self._image_cache)} cached)")
+
+    def _preload_images(self):
+        """Load all images into RAM to eliminate disk I/O during training."""
+        print("  Pre-loading images into RAM...")
+        for i, entry in enumerate(self.entries):
+            try:
+                img = cv2.imread(entry['image_path'], cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    pil_img = Image.open(entry['image_path']).convert('L')
+                    img = np.array(pil_img)
+                self._image_cache[i] = img
+            except Exception:
+                self._image_cache[i] = np.zeros((32, 32), dtype=np.uint8)
+
+    def _load_comer_format(self, caption_path: str, img_dir: str):
+        """Load CoMER format: tab-separated caption.txt + BMP images."""
+        with open(caption_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('\t', 1)
+                if len(parts) < 2:
+                    continue
+                image_id = parts[0]
+                label = parts[1]
+
+                # Find image file (try .bmp first, then others)
+                img_path = None
+                for ext in ['.bmp', '.png', '.jpg']:
+                    candidate = os.path.join(img_dir, image_id + ext)
+                    if os.path.exists(candidate):
+                        img_path = candidate
+                        break
+
+                if img_path is None:
+                    continue
+
+                self.entries.append({
+                    'image_path': img_path,
+                    'latex': label,
+                })
+
+    def _load_csv_format(self, csv_path: str):
+        """Load legacy CSV format."""
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 self.entries.append({
                     'image_path': row['image_path'],
-                    'latex': row['latex']
+                    'latex': row['latex'],
                 })
 
-        print(f"Loaded {len(self.entries)} samples from {csv_path}")
+    def _cache_image_areas(self):
+        """Pre-compute image areas for batch grouping."""
+        print("  Caching image sizes for batch grouping...")
+        self._image_areas = []
+        for entry in self.entries:
+            try:
+                with Image.open(entry['image_path']) as img:
+                    w, h = img.size
+                scale_r = min(self.scale_limit.h_hi / h, self.scale_limit.w_hi / w)
+                if scale_r < 1.0:
+                    h, w = int(h * scale_r), int(w * scale_r)
+                else:
+                    scale_r = max(self.scale_limit.h_lo / h, self.scale_limit.w_lo / w)
+                    if scale_r > 1.0:
+                        h, w = int(h * scale_r), int(w * scale_r)
+                self._image_areas.append(h * w)
+            except Exception:
+                self._image_areas.append(128 * 512)
+        return self._image_areas
+
+    def get_image_area(self, idx: int) -> int:
+        if self._image_areas is None:
+            self._cache_image_areas()
+        return self._image_areas[idx]
 
     def __len__(self):
         return len(self.entries)
@@ -176,37 +261,32 @@ class CROHMEDataset(Dataset):
     def __getitem__(self, idx) -> Dict:
         entry = self.entries[idx]
 
-        # Load image as grayscale numpy array
-        img = cv2.imread(entry['image_path'], cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            # Fallback: try PIL
-            pil_img = Image.open(entry['image_path']).convert('L')
-            img = np.array(pil_img)
+        # Get image from RAM cache (no disk I/O)
+        img = self._image_cache[idx].copy()  # copy for augmentation safety
 
-        # Apply transforms (scale aug + limit range + to_tensor)
-        img_tensor = self.transform(img)  # [1, H, W]
+        # Augmentation pipeline
+        if self.scale_aug is not None:
+            img = self.scale_aug(img)
+        img = self.scale_limit(img)
 
-        # Encode label — raw indices WITHOUT SOS/EOS
-        # (ICAL's plicit_tgt_out adds SOS/EOS in training loop)
+        # To tensor [1, H, W] in [0, 1]
+        img_tensor = torch.from_numpy(img).float().unsqueeze(0) / 255.0
+
+        # Encode label (raw indices, no SOS/EOS)
         raw_indices = self.vocab.encode(entry['latex'], add_sos=False, add_eos=False)
-
-        # Truncate if needed
         if len(raw_indices) > self.max_seq_len:
             raw_indices = raw_indices[:self.max_seq_len]
 
         return {
-            'image': img_tensor,       # [1, H, W] variable size
-            'indices': raw_indices,     # List[int] raw token indices
+            'image': img_tensor,
+            'indices': raw_indices,
             'latex': entry['latex'],
             'image_path': entry['image_path'],
         }
 
 
 def collate_fn(batch: List[Dict]) -> Dict:
-    """
-    ICAL-style collate: dynamic padding to max size in batch.
-    Returns images [B, 1, max_H, max_W], mask [B, max_H, max_W], indices List[List[int]].
-    """
+    """Dynamic padding collate function."""
     images_x = [item['image'] for item in batch]
 
     heights_x = [s.size(1) for s in images_x]
@@ -216,7 +296,6 @@ def collate_fn(batch: List[Dict]) -> Dict:
     max_height_x = max(heights_x)
     max_width_x = max(widths_x)
 
-    # Pad images (ICAL: zero-padded)
     x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
     x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
     for idx, s_x in enumerate(images_x):
@@ -226,9 +305,9 @@ def collate_fn(batch: List[Dict]) -> Dict:
     indices = [item['indices'] for item in batch]
 
     return {
-        'image': x,                # [B, 1, H, W]
-        'padding_mask': x_mask,    # [B, H, W] True=padding
-        'indices': indices,        # List[List[int]] raw token indices
+        'image': x,
+        'padding_mask': x_mask,
+        'indices': indices,
         'latex': [item['latex'] for item in batch],
         'image_path': [item['image_path'] for item in batch],
     }
@@ -238,42 +317,55 @@ def get_dataloader(
     split: str,
     vocab: Vocab,
     config=None,
-    shuffle: bool = None,
 ) -> DataLoader:
-    """Create a DataLoader for a given split."""
+    """Create DataLoader for a given split.
+
+    split: 'train', '2014', '2016', '2019' (or legacy 'val', 'test')
+    """
     from config import Config
 
     if config is None:
         config = Config()
 
-    csv_path = f"{config.data.processed_dir}/{split}.csv"
-
-    if shuffle is None:
-        shuffle = (split == 'train')
-
     is_train = (split == 'train')
 
-    dataset = CROHMEDataset(
-        csv_path=csv_path,
-        vocab=vocab,
-        max_seq_len=config.data.max_seq_len,
-        augment=(is_train and config.data.augment),
-        scale_aug=config.data.scale_aug,
-        scale_lo=config.data.scale_lo,
-        scale_hi=config.data.scale_hi,
-        h_lo=config.data.h_lo,
-        h_hi=config.data.h_hi,
-        w_lo=config.data.w_lo,
-        w_hi=config.data.w_hi,
-    )
+    # Determine data source
+    comer_data_dir = config.data.comer_data_dir
+    caption_path = os.path.join(comer_data_dir, split, 'caption.txt')
+    img_dir = os.path.join(comer_data_dir, split, 'img')
 
-    # Use pre-grouped batching for training
+    if os.path.exists(caption_path):
+        # CoMER format
+        dataset = CROHMEDataset(
+            vocab=vocab,
+            max_seq_len=config.data.max_seq_len,
+            augment=(is_train and config.data.augment),
+            scale_aug=config.data.scale_aug,
+            scale_lo=config.data.scale_lo,
+            scale_hi=config.data.scale_hi,
+            h_lo=config.data.h_lo,
+            h_hi=config.data.h_hi,
+            w_lo=config.data.w_lo,
+            w_hi=config.data.w_hi,
+            caption_path=caption_path,
+            img_dir=img_dir,
+        )
+    else:
+        # Legacy CSV format
+        csv_path = os.path.join(config.data.processed_dir, f"{split}.csv")
+        dataset = CROHMEDataset(
+            vocab=vocab,
+            max_seq_len=config.data.max_seq_len,
+            augment=(is_train and config.data.augment),
+            csv_path=csv_path,
+        )
+
     if is_train:
         batch_sampler = SizeGroupedBatchSampler(
             dataset,
             batch_size=config.data.batch_size,
             max_pixels=config.data.max_batch_pixels,
-            shuffle=shuffle,
+            shuffle=True,
             drop_last=True,
         )
         return DataLoader(
@@ -281,15 +373,16 @@ def get_dataloader(
             batch_sampler=batch_sampler,
             num_workers=config.data.num_workers,
             pin_memory=config.data.pin_memory,
+            persistent_workers=config.data.num_workers > 0,
             collate_fn=collate_fn,
         )
     else:
         return DataLoader(
             dataset,
             batch_size=config.data.batch_size,
-            shuffle=shuffle,
+            shuffle=False,
             num_workers=config.data.num_workers,
             pin_memory=config.data.pin_memory,
+            persistent_workers=config.data.num_workers > 0,
             collate_fn=collate_fn,
-            drop_last=False,
         )

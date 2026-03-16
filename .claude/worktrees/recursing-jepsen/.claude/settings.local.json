@@ -24,7 +24,25 @@
       "Bash(python train.py --overfit --num-samples 5)",
       "Bash(python -c \"import json,sys; h=json.load\\(sys.stdin\\); print\\(f''''Epochs: {len\\(h.get\\(train_loss,[]\\)\\)}''''\\); print\\(f''''Last train_loss: {h[train_loss][-3:] if h.get\\(train_loss\\) else none}''''\\); print\\(f''''ExpRate: {h[exprate][-3:] if h.get\\(exprate\\) else none}''''\\); print\\(f''''Val losses: {h[val_loss][-3:] if h.get\\(val_loss\\) else none}''''\\)\")",
       "Bash(python train.py)",
-      "Bash(python -c \"import einops; print\\(einops.__version__\\)\")"
+      "Bash(python -c \"import einops; print\\(einops.__version__\\)\")",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:github.com)",
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Read(//d/Workplace/CoMER/data/**)",
+      "Bash(done)",
+      "Bash(xargs -I {} file {})",
+      "Bash(xargs wc:*)",
+      "Bash(xargs head:*)",
+      "Bash(python evaluate.py)",
+      "Bash(xargs -I {} bash -c 'file {}')",
+      "Bash(du -sh /d/dataset/mathwriting-2024/*)",
+      "Bash(xargs -I {} bash -c 'file {} && ls -lh {}')",
+      "Bash(xargs -I {} identify {})",
+      "Bash(xargs file:*)",
+      "Bash(ls -lh /d/dataset/mathwriting-2024/test/*.inkml)",
+      "Bash(python evaluate_external.py)"
     ]
   }
 }

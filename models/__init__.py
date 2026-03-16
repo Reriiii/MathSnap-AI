@@ -1,1 +1,1 @@
-from .model import ICAL, build_model
+from .model import CoMER, build_model
