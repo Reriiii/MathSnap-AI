@@ -2,7 +2,8 @@ dataset/
 /papers
 /.venv
 /checkpoints
-*/__pycache__
+**/__pycache__/
 /__pycache__
 /saved_models
 paper_text.txt
+.claude/

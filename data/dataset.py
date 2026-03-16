@@ -1,64 +1,162 @@
 """
-CROHME dataset with augmentation for HMER.
+CROHME dataset for ICAL HMER.
 
-Loads image-LaTeX pairs from preprocessed CSV files.
-Applies paper-simulation augmentations for training.
+Loads image-LaTeX pairs from CSV files. Uses ICAL-style:
+- No pre-padding: images are resized, collate_fn pads per-batch
+- ScaleAugmentation(0.7, 1.4) for training augmentation
+- SizeGroupedBatchSampler for efficient batching
 """
 
 import csv
-import random
 import numpy as np
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Dict
 
+import cv2
 import torch
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image, ImageFilter, ImageOps
+from torch.utils.data import Dataset, DataLoader, Sampler
+from PIL import Image
 import torchvision.transforms as T
-import torchvision.transforms.functional as TF
 
 from data.vocab import Vocab
 
 
+class ScaleAugmentation:
+    """ICAL-style scale augmentation."""
+    def __init__(self, lo: float = 0.7, hi: float = 1.4):
+        self.lo = lo
+        self.hi = hi
+
+    def __call__(self, img: np.ndarray) -> np.ndarray:
+        k = np.random.uniform(self.lo, self.hi)
+        img = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_LINEAR)
+        return img
+
+
+class ScaleToLimitRange:
+    """ICAL-style: ensure image fits within (h_lo..h_hi, w_lo..w_hi)."""
+    def __init__(self, w_lo: int = 16, w_hi: int = 1024, h_lo: int = 16, h_hi: int = 256):
+        self.w_lo = w_lo
+        self.w_hi = w_hi
+        self.h_lo = h_lo
+        self.h_hi = h_hi
+
+    def __call__(self, img: np.ndarray) -> np.ndarray:
+        h, w = img.shape[:2]
+
+        scale_r = min(self.h_hi / h, self.w_hi / w)
+        if scale_r < 1.0:
+            img = cv2.resize(img, None, fx=scale_r, fy=scale_r, interpolation=cv2.INTER_LINEAR)
+            return img
+
+        scale_r = max(self.h_lo / h, self.w_lo / w)
+        if scale_r > 1.0:
+            img = cv2.resize(img, None, fx=scale_r, fy=scale_r, interpolation=cv2.INTER_LINEAR)
+            return img
+
+        return img
+
+
+class SizeGroupedBatchSampler(Sampler):
+    """
+    Pre-grouped batch sampler (ICAL-style).
+    Sorts samples by image area, groups similarly-sized images.
+    Batch ORDER is shuffled each epoch.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        max_pixels: int = 320000,
+        shuffle: bool = True,
+        drop_last: bool = False,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.max_pixels = max_pixels
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.batches = self._build_batches()
+
+    def _get_image_area(self, idx: int) -> int:
+        entry = self.dataset.entries[idx]
+        try:
+            with Image.open(entry['image_path']) as img:
+                w, h = img.size
+            return h * w
+        except Exception:
+            return 256 * 1024  # fallback
+
+    def _build_batches(self):
+        n = len(self.dataset)
+        areas = [(i, self._get_image_area(i)) for i in range(n)]
+        areas.sort(key=lambda x: x[1])
+
+        batches = []
+        current_batch = []
+        biggest_area = 0
+
+        for idx, area in areas:
+            if area > biggest_area:
+                biggest_area = area
+            batch_cost = biggest_area * (len(current_batch) + 1)
+
+            if batch_cost > self.max_pixels or len(current_batch) >= self.batch_size:
+                if current_batch:
+                    batches.append(current_batch)
+                current_batch = [idx]
+                biggest_area = area
+            else:
+                current_batch.append(idx)
+
+        if current_batch and not self.drop_last:
+            batches.append(current_batch)
+
+        return batches
+
+    def __iter__(self):
+        if self.shuffle:
+            order = torch.randperm(len(self.batches)).tolist()
+        else:
+            order = list(range(len(self.batches)))
+        for i in order:
+            yield self.batches[i]
+
+    def __len__(self):
+        return len(self.batches)
+
+
 class CROHMEDataset(Dataset):
     """
-    CROHME dataset for handwritten math expression recognition.
-
-    Loads grayscale images and their LaTeX label sequences.
-    Applies augmentation during training to simulate real paper conditions.
+    CROHME dataset for ICAL HMER.
+    Returns variable-size images (no pre-padding) and raw label indices (no SOS/EOS).
     """
 
     def __init__(
         self,
         csv_path: str,
         vocab: Vocab,
-        img_height: int = 128,
-        img_max_width: int = 512,
         max_seq_len: int = 200,
         augment: bool = False,
-        aug_config: dict = None,
-        scale_heights: tuple = (),
+        scale_aug: bool = True,
+        scale_lo: float = 0.7,
+        scale_hi: float = 1.4,
+        h_lo: int = 16,
+        h_hi: int = 256,
+        w_lo: int = 16,
+        w_hi: int = 1024,
     ):
-        """
-        Args:
-            csv_path:      path to processed CSV file with (image_path, latex) columns
-            vocab:         Vocab instance for encoding labels
-            img_height:    target image height (baseline; overridden by scale_heights)
-            img_max_width: maximum image width (pad/crop to this)
-            max_seq_len:   maximum label sequence length
-            augment:       whether to apply augmentation
-            aug_config:    augmentation parameters dict
-            scale_heights: if non-empty and augment=True, randomly sample the
-                           resize height from this tuple each sample (Li et al. 2020
-                           scale augmentation). img_height is used when not augmenting.
-        """
         self.vocab = vocab
-        self.img_height = img_height
-        self.img_max_width = img_max_width
         self.max_seq_len = max_seq_len
         self.augment = augment
-        self.aug_config = aug_config or {}
-        self.scale_heights = scale_heights
+
+        # Build transforms (ICAL-style)
+        trans_list = []
+        if augment and scale_aug:
+            trans_list.append(ScaleAugmentation(scale_lo, scale_hi))
+        trans_list.append(ScaleToLimitRange(w_lo=w_lo, w_hi=w_hi, h_lo=h_lo, h_hi=h_hi))
+        trans_list.append(T.ToTensor())  # [0, 1] range
+        self.transform = T.Compose(trans_list)
 
         # Load data entries
         self.entries = []
@@ -75,221 +173,64 @@ class CROHMEDataset(Dataset):
     def __len__(self):
         return len(self.entries)
 
-    def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx) -> Dict:
         entry = self.entries[idx]
 
-        # Load image
-        img = Image.open(entry['image_path']).convert('L')  # grayscale
+        # Load image as grayscale numpy array
+        img = cv2.imread(entry['image_path'], cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            # Fallback: try PIL
+            pil_img = Image.open(entry['image_path']).convert('L')
+            img = np.array(pil_img)
 
-        # Apply augmentation
-        if self.augment:
-            img = self._augment(img)
+        # Apply transforms (scale aug + limit range + to_tensor)
+        img_tensor = self.transform(img)  # [1, H, W]
 
-        # Resize and pad
-        img = self._resize_and_pad(img)
-
-        # Convert to tensor and normalize
-        img_tensor = TF.to_tensor(img)  # [1, H, W], values in [0, 1]
-        img_tensor = TF.normalize(img_tensor, mean=[0.5], std=[0.5])  # [-1, 1]
-
-        # Encode label
-        label_indices = self.vocab.encode(entry['latex'], add_sos=True, add_eos=True)
+        # Encode label — raw indices WITHOUT SOS/EOS
+        # (ICAL's plicit_tgt_out adds SOS/EOS in training loop)
+        raw_indices = self.vocab.encode(entry['latex'], add_sos=False, add_eos=False)
 
         # Truncate if needed
-        if len(label_indices) > self.max_seq_len:
-            label_indices = label_indices[:self.max_seq_len - 1] + [self.vocab.eos_idx]
-
-        label_tensor = torch.tensor(label_indices, dtype=torch.long)
+        if len(raw_indices) > self.max_seq_len:
+            raw_indices = raw_indices[:self.max_seq_len]
 
         return {
-            'image': img_tensor,
-            'target': label_tensor,
+            'image': img_tensor,       # [1, H, W] variable size
+            'indices': raw_indices,     # List[int] raw token indices
             'latex': entry['latex'],
-            'image_path': entry['image_path']
+            'image_path': entry['image_path'],
         }
 
-    def _resize_and_pad(self, img: Image.Image) -> Image.Image:
-        """
-        Resize image to target height maintaining aspect ratio, then pad width.
 
-        Scale augmentation (Li et al. ICFHR 2020): during training, randomly
-        sample the target height from scale_heights instead of always using
-        img_height. This exposes the model to the same expression at multiple
-        scales, improving robustness to subscript/superscript size variation.
-        """
-        w, h = img.size
-
-        # Choose target height
-        if self.augment and self.scale_heights:
-            target_h = random.choice(self.scale_heights)
-        else:
-            target_h = self.img_height
-
-        new_w = int(w * (target_h / h))
-        if new_w > self.img_max_width:
-            new_w = self.img_max_width
-
-        img = img.resize((new_w, target_h), Image.BILINEAR)
-
-        # Pad to max width (right padding with white)
-        if new_w < self.img_max_width:
-            padded = Image.new('L', (self.img_max_width, target_h), 255)
-            padded.paste(img, (0, 0))
-            img = padded
-
-        return img
-
-    def _augment(self, img: Image.Image) -> Image.Image:
-        """
-        Apply augmentation to simulate handwritten expressions on paper.
-
-        Includes: rotation, affine, perspective, noise, erosion/dilation,
-        brightness/contrast variation, and paper texture simulation.
-
-        global_prob in aug_config acts as a curriculum gate: during early
-        training it is set below 1.0 so augmentations are applied less
-        frequently, letting the model first learn from cleaner images.
-        """
-        cfg = self.aug_config
-
-        # Curriculum gate — scales all per-augmentation probabilities uniformly.
-        # Set to 1.0 (full augmentation) once the model has warmed up.
-        global_prob = cfg.get('global_prob', 1.0)
-
-        def should_apply(base_prob: float) -> bool:
-            return random.random() < base_prob * global_prob
-
-        # 1. Random rotation
-        rotation_range = cfg.get('rotation_range', 5.0)
-        if should_apply(0.5):
-            angle = random.uniform(-rotation_range, rotation_range)
-            img = img.rotate(angle, fillcolor=255, expand=False)
-
-        # 2. Random affine (scale + shear)
-        scale_range = cfg.get('scale_range', (0.9, 1.1))
-        shear_range = cfg.get('shear_range', 0.1)
-        if should_apply(0.5):
-            scale = random.uniform(*scale_range)
-            shear_x = random.uniform(-shear_range, shear_range)
-            shear_y = random.uniform(-shear_range, shear_range)
-            w, h = img.size
-            img = TF.affine(
-                img,
-                angle=0,
-                translate=(0, 0),
-                scale=scale,
-                shear=(shear_x * 180, shear_y * 180),
-                fill=255
-            )
-
-        # 3. Random perspective distortion
-        if should_apply(0.3):
-            img = TF.to_tensor(img)
-            img = T.RandomPerspective(distortion_scale=0.1, p=1.0, fill=1.0)(img)
-            img = TF.to_pil_image(img)
-
-        # 4. Brightness and contrast jitter
-        brightness_range = cfg.get('brightness_range', (0.7, 1.3))
-        contrast_range = cfg.get('contrast_range', (0.7, 1.3))
-        if should_apply(0.5):
-            brightness_factor = random.uniform(*brightness_range)
-            img = TF.adjust_brightness(img, brightness_factor)
-        if should_apply(0.5):
-            contrast_factor = random.uniform(*contrast_range)
-            img = TF.adjust_contrast(img, contrast_factor)
-
-        # 5. Erosion/dilation (stroke thickness variation)
-        erosion_dilation_prob = cfg.get('erosion_dilation_prob', 0.15)
-        kernel_size = cfg.get('erosion_dilation_kernel', 2)
-        if should_apply(erosion_dilation_prob):
-            if random.random() < 0.5:
-                # Dilation (thicker strokes) - using MinFilter
-                img = img.filter(ImageFilter.MinFilter(kernel_size + 1))
-            else:
-                # Erosion (thinner strokes) - using MaxFilter
-                img = img.filter(ImageFilter.MaxFilter(kernel_size + 1))
-
-        # 6. Gaussian noise
-        noise_std = cfg.get('noise_std', 0.02)
-        if should_apply(0.4):
-            img_np = np.array(img, dtype=np.float32) / 255.0
-            noise = np.random.normal(0, noise_std, img_np.shape)
-            img_np = np.clip(img_np + noise, 0, 1)
-            img = Image.fromarray((img_np * 255).astype(np.uint8))
-
-        # 7. Gaussian blur (simulate slight paper texture / scan blur)
-        if should_apply(0.2):
-            radius = random.uniform(0.3, 1.0)
-            img = img.filter(ImageFilter.GaussianBlur(radius=radius))
-
-        # 8. Random elastic deformation
-        elastic_alpha = cfg.get('elastic_alpha', 8.0)
-        elastic_sigma = cfg.get('elastic_sigma', 6.0)
-        if should_apply(0.3):
-            img = self._elastic_transform(img, elastic_alpha, elastic_sigma)
-
-        return img
-
-    def _elastic_transform(
-        self, img: Image.Image, alpha: float, sigma: float
-    ) -> Image.Image:
-        """Apply elastic deformation to simulate natural handwriting variation."""
-        from scipy.ndimage import gaussian_filter, map_coordinates
-
-        img_np = np.array(img, dtype=np.float32)
-        shape = img_np.shape
-
-        # Generate random displacement field
-        dx = gaussian_filter(
-            (np.random.rand(*shape) * 2 - 1), sigma, mode="constant", cval=0
-        ) * alpha
-        dy = gaussian_filter(
-            (np.random.rand(*shape) * 2 - 1), sigma, mode="constant", cval=0
-        ) * alpha
-
-        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
-        indices = [np.clip(y + dy, 0, shape[0] - 1), np.clip(x + dx, 0, shape[1] - 1)]
-
-        distorted = map_coordinates(img_np, indices, order=1, mode='constant', cval=255)
-
-        return Image.fromarray(distorted.astype(np.uint8))
-
-
-def collate_fn(batch: List[dict]) -> dict:
+def collate_fn(batch: List[Dict]) -> Dict:
     """
-    Custom collate function to handle variable-length sequences.
-
-    Pads targets to the same length within the batch.
-    Images are already padded to img_max_width.
+    ICAL-style collate: dynamic padding to max size in batch.
+    Returns images [B, 1, max_H, max_W], mask [B, max_H, max_W], indices List[List[int]].
     """
-    # Pad images to same height within batch (scale augmentation produces variable heights)
-    max_h = max(item['image'].size(1) for item in batch)
-    max_w = max(item['image'].size(2) for item in batch)
-    padded_images = []
-    for item in batch:
-        img = item['image']  # [1, H, W]
-        pad_h = max_h - img.size(1)
-        pad_w = max_w - img.size(2)
-        if pad_h > 0 or pad_w > 0:
-            # Pad bottom and right with white (1.0 for normalized, 255-based)
-            img = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h), value=1.0)
-        padded_images.append(img)
-    images = torch.stack(padded_images)
+    images_x = [item['image'] for item in batch]
 
-    # Get max target length in this batch
-    max_len = max(item['target'].size(0) for item in batch)
+    heights_x = [s.size(1) for s in images_x]
+    widths_x = [s.size(2) for s in images_x]
 
-    # Pad targets (with PAD=0 index)
-    padded_targets = torch.zeros(len(batch), max_len, dtype=torch.long)
-    for i, item in enumerate(batch):
-        tgt = item['target']
-        padded_targets[i, :tgt.size(0)] = tgt
+    n_samples = len(heights_x)
+    max_height_x = max(heights_x)
+    max_width_x = max(widths_x)
+
+    # Pad images (ICAL: zero-padded)
+    x = torch.zeros(n_samples, 1, max_height_x, max_width_x)
+    x_mask = torch.ones(n_samples, max_height_x, max_width_x, dtype=torch.bool)
+    for idx, s_x in enumerate(images_x):
+        x[idx, :, :heights_x[idx], :widths_x[idx]] = s_x
+        x_mask[idx, :heights_x[idx], :widths_x[idx]] = 0
+
+    indices = [item['indices'] for item in batch]
 
     return {
-        'image': images,
-        'target': padded_targets,
+        'image': x,                # [B, 1, H, W]
+        'padding_mask': x_mask,    # [B, H, W] True=padding
+        'indices': indices,        # List[List[int]] raw token indices
         'latex': [item['latex'] for item in batch],
-        'image_path': [item['image_path'] for item in batch]
+        'image_path': [item['image_path'] for item in batch],
     }
 
 
@@ -299,15 +240,7 @@ def get_dataloader(
     config=None,
     shuffle: bool = None,
 ) -> DataLoader:
-    """
-    Create a DataLoader for a given split.
-
-    Args:
-        split: 'train', 'val', or 'test'
-        vocab: Vocab instance
-        config: Config instance (uses defaults if None)
-        shuffle: override shuffle (default: True for train, False otherwise)
-    """
+    """Create a DataLoader for a given split."""
     from config import Config
 
     if config is None:
@@ -318,36 +251,45 @@ def get_dataloader(
     if shuffle is None:
         shuffle = (split == 'train')
 
-    aug_config = {
-        'rotation_range': config.data.rotation_range,
-        'scale_range': config.data.scale_range,
-        'shear_range': config.data.shear_range,
-        'brightness_range': config.data.brightness_range,
-        'contrast_range': config.data.contrast_range,
-        'noise_std': config.data.noise_std,
-        'elastic_alpha': config.data.elastic_alpha,
-        'elastic_sigma': config.data.elastic_sigma,
-        'erosion_dilation_prob': config.data.erosion_dilation_prob,
-        'erosion_dilation_kernel': config.data.erosion_dilation_kernel,
-    }
+    is_train = (split == 'train')
 
     dataset = CROHMEDataset(
         csv_path=csv_path,
         vocab=vocab,
-        img_height=config.data.img_height,
-        img_max_width=config.data.img_max_width,
         max_seq_len=config.data.max_seq_len,
-        augment=(split == 'train' and config.data.augment),
-        aug_config=aug_config,
-        scale_heights=tuple(config.train.scale_heights) if (split == 'train' and config.data.augment) else (),
+        augment=(is_train and config.data.augment),
+        scale_aug=config.data.scale_aug,
+        scale_lo=config.data.scale_lo,
+        scale_hi=config.data.scale_hi,
+        h_lo=config.data.h_lo,
+        h_hi=config.data.h_hi,
+        w_lo=config.data.w_lo,
+        w_hi=config.data.w_hi,
     )
 
-    return DataLoader(
-        dataset,
-        batch_size=config.data.batch_size,
-        shuffle=shuffle,
-        num_workers=config.data.num_workers,
-        pin_memory=config.data.pin_memory,
-        collate_fn=collate_fn,
-        drop_last=(split == 'train'),
-    )
+    # Use pre-grouped batching for training
+    if is_train:
+        batch_sampler = SizeGroupedBatchSampler(
+            dataset,
+            batch_size=config.data.batch_size,
+            max_pixels=config.data.max_batch_pixels,
+            shuffle=shuffle,
+            drop_last=True,
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
+            collate_fn=collate_fn,
+        )
+    else:
+        return DataLoader(
+            dataset,
+            batch_size=config.data.batch_size,
+            shuffle=shuffle,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
+            collate_fn=collate_fn,
+            drop_last=False,
+        )

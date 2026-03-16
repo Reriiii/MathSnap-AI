@@ -1,246 +1,191 @@
 """
-DenseNet encoder for HMER.
-
-Multi-scale dense feature extractor adapted for single-channel
-handwritten math expression images. Outputs a flattened sequence
-of 2D features with positional encoding for the Transformer decoder.
-
-Key design choice — number of transition layers:
-  With img_height=128, img_max_width=512 and the standard initial
-  conv (stride=2) + maxpool (stride=2), the feature map entering the
-  dense blocks is already 32x128. Each transition halves both dims:
-    3 transitions -> 4x16 = 64 tokens  (too sparse for 200-token exprs)
-    2 transitions -> 8x32 = 256 tokens (recommended)
-  Use num_transitions=2 to preserve spatial resolution.
-
-Also exposes intermediate feature maps from each dense block for use
-by the multi-scale counting module (CAN, ECCV 2022).
-
-BatchNorm momentum is set to 0.05 (half the PyTorch default of 0.1).
-Lower momentum makes running_mean/var track distribution shifts more
-smoothly during curriculum augmentation ramp-up.
+DenseNet encoder from ICAL.
+Copied from: https://github.com/qingzhenduyu/ICAL
 """
-
 import math
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections import OrderedDict
-from typing import Tuple, List
+from einops import rearrange
+from torch import FloatTensor, LongTensor
 
-_BN_MOMENTUM = 0.05
-
-
-class _DenseLayer(nn.Module):
-    """Single dense layer: BN -> ReLU -> 1x1 Conv -> BN -> ReLU -> 3x3 Conv."""
-
-    def __init__(self, in_channels: int, growth_rate: int, bn_size: int, drop_rate: float):
-        super().__init__()
-        inter_channels = bn_size * growth_rate
-
-        self.norm1 = nn.BatchNorm2d(in_channels, momentum=_BN_MOMENTUM)
-        self.conv1 = nn.Conv2d(in_channels, inter_channels, kernel_size=1, bias=False)
-        self.norm2 = nn.BatchNorm2d(inter_channels, momentum=_BN_MOMENTUM)
-        self.conv2 = nn.Conv2d(inter_channels, growth_rate, kernel_size=3, padding=1, bias=False)
-        self.drop_rate = drop_rate
-
-    def forward(self, x):
-        out = self.conv1(F.relu(self.norm1(x), inplace=True))
-        out = self.conv2(F.relu(self.norm2(out), inplace=True))
-        if self.drop_rate > 0:
-            out = F.dropout(out, p=self.drop_rate, training=self.training)
-        return torch.cat([x, out], dim=1)
+from .pos_enc import ImgPosEnc
 
 
-class _DenseBlock(nn.Module):
-    """A block of multiple dense layers."""
-
-    def __init__(self, num_layers: int, in_channels: int, growth_rate: int,
-                 bn_size: int, drop_rate: float):
-        super().__init__()
-        self.layers = nn.ModuleList()
-        for i in range(num_layers):
-            layer = _DenseLayer(
-                in_channels + i * growth_rate,
-                growth_rate, bn_size, drop_rate
-            )
-            self.layers.append(layer)
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-
-class _Transition(nn.Module):
-    """Transition layer: BN -> 1x1 Conv -> AvgPool."""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.norm = nn.BatchNorm2d(in_channels, momentum=_BN_MOMENTUM)
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
-
-    def forward(self, x):
-        x = self.conv(F.relu(self.norm(x), inplace=True))
-        x = self.pool(x)
-        return x
-
-
-class PositionalEncoding2D(nn.Module):
-    """
-    2D sinusoidal positional encoding for feature maps.
-
-    The d_model channels are split evenly between height and width
-    encodings, then concatenated. Each half uses the standard
-    sin/cos formulation independently.
-    """
-
-    def __init__(self, d_model: int, max_h: int = 64, max_w: int = 256, dropout: float = 0.1):
-        super().__init__()
-        assert d_model % 2 == 0, "d_model must be even for 2D positional encoding"
-        self.dropout = nn.Dropout(p=dropout)
-        half = d_model // 2
-
-        pe_h = torch.zeros(max_h, half)
-        pe_w = torch.zeros(max_w, half)
-
-        pos_h = torch.arange(0, max_h).unsqueeze(1).float()
-        pos_w = torch.arange(0, max_w).unsqueeze(1).float()
-
-        div_term = torch.exp(
-            torch.arange(0, half, 2).float() * -(math.log(10000.0) / half)
+# DenseNet-B
+class _Bottleneck(nn.Module):
+    def __init__(self, n_channels: int, growth_rate: int, use_dropout: bool):
+        super(_Bottleneck, self).__init__()
+        interChannels = 4 * growth_rate
+        self.bn1 = nn.BatchNorm2d(interChannels)
+        self.conv1 = nn.Conv2d(n_channels, interChannels,
+                               kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(growth_rate)
+        self.conv2 = nn.Conv2d(
+            interChannels, growth_rate, kernel_size=3, padding=1, bias=False
         )
+        self.use_dropout = use_dropout
+        self.dropout = nn.Dropout(p=0.2)
 
-        pe_h[:, 0::2] = torch.sin(pos_h * div_term)
-        pe_h[:, 1::2] = torch.cos(pos_h * div_term[:half // 2 + half % 2])
-        pe_w[:, 0::2] = torch.sin(pos_w * div_term)
-        pe_w[:, 1::2] = torch.cos(pos_w * div_term[:half // 2 + half % 2])
-
-        self.register_buffer('pe_h', pe_h)
-        self.register_buffer('pe_w', pe_w)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = x.shape
-        pos_h = self.pe_h[:H, :].unsqueeze(1).expand(-1, W, -1)
-        pos_w = self.pe_w[:W, :].unsqueeze(0).expand(H, -1, -1)
-        pos = torch.cat([pos_h, pos_w], dim=-1).permute(2, 0, 1)
-        return self.dropout(x + pos.unsqueeze(0))
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = F.relu(self.bn2(self.conv2(out)), inplace=True)
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = torch.cat((x, out), 1)
+        return out
 
 
-class DenseNetEncoder(nn.Module):
-    """
-    DenseNet-based encoder for HMER.
+# single layer
+class _SingleLayer(nn.Module):
+    def __init__(self, n_channels: int, growth_rate: int, use_dropout: bool):
+        super(_SingleLayer, self).__init__()
+        self.bn1 = nn.BatchNorm2d(n_channels)
+        self.conv1 = nn.Conv2d(
+            n_channels, growth_rate, kernel_size=3, padding=1, bias=False
+        )
+        self.use_dropout = use_dropout
+        self.dropout = nn.Dropout(p=0.2)
 
-    Takes grayscale images and produces a sequence of feature vectors
-    with 2D positional encoding.
+    def forward(self, x):
+        out = self.conv1(F.relu(x, inplace=True))
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = torch.cat((x, out), 1)
+        return out
 
-    The num_transitions parameter controls how many transition (halving)
-    layers are inserted between dense blocks. Fewer transitions preserve
-    spatial resolution and produce more encoder tokens for the decoder
-    to attend to:
-        num_transitions=3 (default DenseNet) -> 64 tokens  for 128x512 input
-        num_transitions=2 (recommended)      -> 256 tokens for 128x512 input
 
-    Also exposes intermediate feature maps from each dense block for use
-    by the multi-scale counting module (CAN, ECCV 2022).
-    """
+# transition layer
+class _Transition(nn.Module):
+    def __init__(self, n_channels: int, n_out_channels: int, use_dropout: bool):
+        super(_Transition, self).__init__()
+        self.bn1 = nn.BatchNorm2d(n_out_channels)
+        self.conv1 = nn.Conv2d(n_channels, n_out_channels,
+                               kernel_size=1, bias=False)
+        self.use_dropout = use_dropout
+        self.dropout = nn.Dropout(p=0.2)
 
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        if self.use_dropout:
+            out = self.dropout(out)
+        out = F.avg_pool2d(out, 2, ceil_mode=True)
+        return out
+
+
+class DenseNet(nn.Module):
     def __init__(
         self,
-        in_channels: int = 1,
-        growth_rate: int = 24,
-        block_config: tuple = (6, 12, 16, 8),
-        num_init_features: int = 64,
-        bn_size: int = 4,
-        drop_rate: float = 0.2,
-        compression: float = 0.8,
-        d_model: int = 256,
-        num_transitions: int = 2,
-        pos_dropout: float = 0.1,
-        num_groups: int = 32,  # kept for API compat, unused with BN
+        growth_rate: int,
+        num_layers: int,
+        reduction: float = 0.5,
+        bottleneck: bool = True,
+        use_dropout: bool = True,
     ):
+        super(DenseNet, self).__init__()
+        n_dense_blocks = num_layers
+        n_channels = 2 * growth_rate
+        self.conv1 = nn.Conv2d(
+            1, n_channels, kernel_size=7, padding=3, stride=2, bias=False
+        )
+        self.norm1 = nn.BatchNorm2d(n_channels)
+        self.dense1 = self._make_dense(
+            n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout
+        )
+        n_channels += n_dense_blocks * growth_rate
+        n_out_channels = int(math.floor(n_channels * reduction))
+        self.trans1 = _Transition(n_channels, n_out_channels, use_dropout)
+
+        n_channels = n_out_channels
+        self.dense2 = self._make_dense(
+            n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout
+        )
+        n_channels += n_dense_blocks * growth_rate
+        n_out_channels = int(math.floor(n_channels * reduction))
+        self.trans2 = _Transition(n_channels, n_out_channels, use_dropout)
+
+        n_channels = n_out_channels
+        self.dense3 = self._make_dense(
+            n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout
+        )
+
+        self.out_channels = n_channels + n_dense_blocks * growth_rate
+        self.post_norm = nn.BatchNorm2d(self.out_channels)
+
+    @staticmethod
+    def _make_dense(n_channels, growth_rate, n_dense_blocks, bottleneck, use_dropout):
+        layers = []
+        for _ in range(int(n_dense_blocks)):
+            if bottleneck:
+                layers.append(_Bottleneck(
+                    n_channels, growth_rate, use_dropout))
+            else:
+                layers.append(_SingleLayer(
+                    n_channels, growth_rate, use_dropout))
+            n_channels += growth_rate
+        return nn.Sequential(*layers)
+
+    def forward(self, x, x_mask):
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out_mask = x_mask[:, 0::2, 0::2]
+        out = F.relu(out, inplace=True)
+        out = F.max_pool2d(out, 2, ceil_mode=True)
+        out_mask = out_mask[:, 0::2, 0::2]
+        out = self.dense1(out)
+        out = self.trans1(out)
+        out_mask = out_mask[:, 0::2, 0::2]
+        out = self.dense2(out)
+        out = self.trans2(out)
+        out_mask = out_mask[:, 0::2, 0::2]
+        out = self.dense3(out)
+        out = self.post_norm(out)
+        return out, out_mask
+
+
+class Encoder(nn.Module):
+    def __init__(self, d_model: int, growth_rate: int, num_layers: int):
         super().__init__()
-        self.num_blocks = len(block_config)
-        self.num_transitions = num_transitions
 
-        # Initial convolution
-        self.init_conv = nn.Sequential(OrderedDict([
-            ('conv0', nn.Conv2d(in_channels, num_init_features, kernel_size=7,
-                                stride=2, padding=3, bias=False)),
-            ('norm0', nn.BatchNorm2d(num_init_features, momentum=_BN_MOMENTUM)),
-            ('relu0', nn.ReLU(inplace=True)),
-            ('pool0', nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
-        ]))
+        self.model = DenseNet(growth_rate=growth_rate, num_layers=num_layers)
 
-        # Dense blocks and transitions (stored separately to capture intermediates)
-        self.dense_blocks = nn.ModuleList()
-        self.transitions = nn.ModuleList()
-        self._block_out_channels = []
+        self.feature_proj = nn.Conv2d(
+            self.model.out_channels, d_model, kernel_size=1)
 
-        num_features = num_init_features
-        for i, num_layers in enumerate(block_config):
-            block = _DenseBlock(
-                num_layers=num_layers,
-                in_channels=num_features,
-                growth_rate=growth_rate,
-                bn_size=bn_size,
-                drop_rate=drop_rate,
-            )
-            self.dense_blocks.append(block)
-            num_features = num_features + num_layers * growth_rate
-            self._block_out_channels.append(num_features)
+        self.pos_enc_2d = ImgPosEnc(d_model, normalize=True)
 
-            if i < num_transitions:
-                out_features = int(num_features * compression)
-                trans = _Transition(num_features, out_features)
-                self.transitions.append(trans)
-                num_features = out_features
+        self.norm = nn.LayerNorm(d_model)
 
-        # Final batch norm
-        self.norm_final = nn.BatchNorm2d(num_features, momentum=_BN_MOMENTUM)
+    def forward(
+        self, img: FloatTensor, img_mask: LongTensor
+    ) -> Tuple[FloatTensor, LongTensor]:
+        """encode image to feature
 
-        # Project to d_model
-        self.projection = nn.Conv2d(num_features, d_model, kernel_size=1)
+        Parameters
+        ----------
+        img : FloatTensor
+            [b, 1, h', w']
+        img_mask: LongTensor
+            [b, h', w']
 
-        # 2D positional encoding with dropout
-        self.pos_encoding = PositionalEncoding2D(d_model, dropout=pos_dropout)
-
-        self.d_model = d_model
-        self._num_features = num_features
-
-    @property
-    def block_out_channels(self) -> List[int]:
-        """Channel counts after each dense block (before transition)."""
-        return list(self._block_out_channels)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, int, List[torch.Tensor]]:
+        Returns
+        -------
+        Tuple[FloatTensor, LongTensor]
+            [b, h, w, d], [b, h, w]
         """
-        Args:
-            x: [B, 1, H, W] grayscale image
+        # extract feature
+        feature, mask = self.model(img, img_mask)
+        feature = self.feature_proj(feature)
 
-        Returns:
-            features:       [B, S, d_model] where S = feat_h * feat_w
-            feat_h:         encoder feature map height
-            feat_w:         encoder feature map width
-            intermediates:  list of [B, C_i, H_i, W_i] feature maps from each dense block
-        """
-        x = self.init_conv(x)
+        # proj
+        feature = rearrange(feature, "b d h w -> b h w d")
 
-        intermediates = []
-        trans_idx = 0
-        for i, block in enumerate(self.dense_blocks):
-            x = block(x)
-            intermediates.append(x)
-            if i < self.num_transitions:
-                x = self.transitions[trans_idx](x)
-                trans_idx += 1
+        # positional encoding
+        feature = self.pos_enc_2d(feature, mask)
+        feature = self.norm(feature)
 
-        x = self.norm_final(x)
-        x = F.relu(x, inplace=True)
-        x = self.projection(x)        # [B, d_model, H', W']
-        x = self.pos_encoding(x)      # [B, d_model, H', W']
-
-        B, C, H, W = x.shape
-        features = x.view(B, C, H * W).permute(0, 2, 1)  # [B, S, d_model]
-        return features, H, W, intermediates
+        return feature, mask

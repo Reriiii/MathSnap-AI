@@ -5,7 +5,26 @@
       "Bash(python -c \":*)",
       "Bash(python train.py --overfit_test --num_samples 10 --epochs 50)",
       "Bash(python -c \"import train; print\\(''OK''\\)\")",
-      "Bash(python train.py --epochs 6)"
+      "Bash(python train.py --epochs 6)",
+      "Bash(python analyze_errors.py)",
+      "Bash(python train.py --overfit_test --num_samples 5 --epochs 50)",
+      "Bash(find /d/Workplace/ICAL -type f \\\\\\(-name *.yaml -o -name *.yml -o -name *.json -o -name config* -o -name *model* \\\\\\))",
+      "Bash(grep -r \"beam_size\\\\|greedy\\\\|decode\\\\|generate\" D:WorkplaceICAL --include=*.json --include=*.yaml --include=*.yml)",
+      "Bash(wc -l /d/Workplace/ICAL/ical/model/*.py /d/Workplace/hmer/models/*.py)",
+      "Bash(python train.py --overfit_test --num_samples 10 --epochs 80)",
+      "Bash(pip install:*)",
+      "Bash(python train.py --overfit_test --num_samples 5 --epochs 30)",
+      "Bash(find /d/Workplace/ICAL -type f \\\\\\(-name *.yaml -o -name *.yml -o -name config.py \\\\\\))",
+      "Bash(python train.py --overfit_test --num_samples 5 --epochs 15)",
+      "Bash(python train.py --overfit_test --num_samples 5 --epochs 10)",
+      "Bash(pushd \"D:\\\\Workplace\\\\hmer\")",
+      "Bash(nvidia-smi)",
+      "Bash(wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list)",
+      "Bash(systeminfo)",
+      "Bash(python train.py --overfit --num-samples 5)",
+      "Bash(python -c \"import json,sys; h=json.load\\(sys.stdin\\); print\\(f''''Epochs: {len\\(h.get\\(train_loss,[]\\)\\)}''''\\); print\\(f''''Last train_loss: {h[train_loss][-3:] if h.get\\(train_loss\\) else none}''''\\); print\\(f''''ExpRate: {h[exprate][-3:] if h.get\\(exprate\\) else none}''''\\); print\\(f''''Val losses: {h[val_loss][-3:] if h.get\\(val_loss\\) else none}''''\\)\")",
+      "Bash(python train.py)",
+      "Bash(python -c \"import einops; print\\(einops.__version__\\)\")"
     ]
   }
 }
