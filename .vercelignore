@@ -4,19 +4,13 @@ deployment/
 checkpoints/
 dataset/
 models/
-data/
+/data/
 outputs/
 .venv/
 __pycache__/
 *.py
 *.pt
 *.pth
-
-# Large/unnecessary files
-*.woff
-*.woff2
-*.ttf
-*.otf
 
 # Dev files
 .claude/

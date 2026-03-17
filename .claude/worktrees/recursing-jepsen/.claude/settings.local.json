@@ -51,7 +51,18 @@
       "Bash(vercel logs:*)",
       "Bash(find D:/Workplace/hmer -name train.py -o -name training*.py)",
       "Bash(find D:/Workplace/hmer/data -type f -name *.py)",
-      "Bash(grep -E \"\\\\.tsx?$\")"
+      "Bash(grep -E \"\\\\.tsx?$\")",
+      "Bash(find /d/Workplace/hmer -type f -name *.tsx -o -name *.ts -o -name *.py -o -name *.json)",
+      "Bash(xargs grep:*)",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIzaSyCwdM4RB-wUA-xxtCYEwideetEegHdNuIk\" -H \"Content-Type: application/json\" -d '{\"\"contents\"\":[{\"\"parts\"\":[{\"\"text\"\":\"\"Hello\"\"}]}]}')",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyAcdQjfAA7W7dMqvFksYRp-6BhSazkxYQc\" -H \"Content-Type: application/json\" -d '{\"\"contents\"\":[{\"\"parts\"\":[{\"\"text\"\":\"\"Hello\"\"}]}]}')",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=AIzaSyAcdQjfAA7W7dMqvFksYRp-6BhSazkxYQc\" -H \"Content-Type: application/json\" -d '{\"\"\"\"contents\"\"\"\":[{\"\"\"\"parts\"\"\"\":[{\"\"\"\"text\"\"\"\":\"\"\"\"Hello\"\"\"\"}]}]}')",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=AIzaSyAcdQjfAA7W7dMqvFksYRp-6BhSazkxYQc\" -H \"Content-Type: application/json\" -d '{\"\"\"\"contents\"\"\"\":[{\"\"\"\"parts\"\"\"\":[{\"\"\"\"text\"\"\"\":\"\"\"\"Hello\"\"\"\"}]}]}')",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyD2lsj5cwH2wcJw6aExJTXmogpIimwbxHU\" -H \"Content-Type: application/json\" -d '{\"\"contents\"\":[{\"\"parts\"\":[{\"\"text\"\":\"\"Hello\"\"}]}]}')",
+      "Bash(vercel deploy:*)",
+      "Bash(vercel build:*)",
+      "Bash(vercel --prod)",
+      "Bash(grep -r \"ResizablePanelGroup\\\\|ResizablePanel\\\\|react-resizable-panels\" D:Workplacehmersrc --include=*.tsx --include=*.ts)"
     ]
   }
 }
