@@ -7,6 +7,7 @@ import { ScrollArea } from "@/app/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetTrigger } from "@/app/components/ui/sheet";
 import { Skeleton } from "@/app/components/ui/skeleton";
 import { Separator } from "@/app/components/ui/separator";
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/app/components/ui/resizable";
 import {
   Upload, Copy, Send, MessageSquare, Loader2, ImageIcon, X,
   ZoomIn, ZoomOut, RotateCcw, WrapText, Type, Minus, Plus,
@@ -18,79 +19,99 @@ import { toast } from "sonner";
 // ============================================================
 // ImagePanel — Upload area with drag & drop
 // ============================================================
+interface ImageItem {
+  id: string;
+  url: string;
+  file: File;
+  latex: string;
+  status: "pending" | "processing" | "done" | "error";
+}
+
 interface ImagePanelProps {
-  selectedImage: string | null;
+  images: ImageItem[];
+  activeImageId: string | null;
   isProcessing: boolean;
-  onUpload: (file: File) => void;
-  onClear: () => void;
+  onUpload: (files: File[]) => void;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+  onClearAll: () => void;
   compact?: boolean;
 }
 
-function ImagePanel({ selectedImage, isProcessing, onUpload, onClear, compact }: ImagePanelProps) {
+function ImagePanel({ images, activeImageId, isProcessing, onUpload, onSelect, onRemove, onClearAll, compact }: ImagePanelProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeImage = images.find((img) => img.id === activeImageId);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) onUpload(file);
+    const files = Array.from(event.target.files || []);
+    if (files.length > 0) onUpload(files);
+    event.target.value = "";
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith("image/")) onUpload(file);
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
+    if (files.length > 0) onUpload(files);
   };
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); };
 
-  // Compact mode for tablet: horizontal strip with thumbnail
+  // Compact mode for tablet/mobile: horizontal strip with thumbnails
   if (compact) {
     return (
       <div
-        className="flex items-center gap-3 p-3 border-b border-border bg-card"
+        className="flex items-center gap-2 p-2 border-b border-border bg-card overflow-x-auto"
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
       >
-        {selectedImage ? (
-          <>
-            <div className="h-14 w-20 rounded-lg border bg-muted/20 overflow-hidden flex-shrink-0 relative">
-              <img src={selectedImage} alt="Uploaded" className="w-full h-full object-contain" />
-              {isProcessing && (
-                <div className="absolute inset-0 bg-background/60 flex items-center justify-center">
-                  <Loader2 className="h-4 w-4 text-primary animate-spin" />
-                </div>
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium truncate">Image uploaded</p>
-              <p className="text-[10px] text-muted-foreground">Click to change or drag new image</p>
-            </div>
-            <Button variant="ghost" size="sm" onClick={onClear} className="h-7 text-xs flex-shrink-0">
-              <X className="h-3 w-3 mr-1" /> Clear
-            </Button>
-          </>
-        ) : (
+        {/* Upload button */}
+        <div
+          onClick={() => !isProcessing && fileInputRef.current?.click()}
+          className={`h-12 w-14 rounded-lg border-2 border-dashed flex items-center justify-center cursor-pointer flex-shrink-0 transition-all ${
+            isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+          }`}
+        >
+          <Plus className="h-4 w-4 text-muted-foreground" />
+        </div>
+        {/* Thumbnail list */}
+        {images.map((img) => (
           <div
-            onClick={() => !isProcessing && fileInputRef.current?.click()}
-            className={`flex-1 flex items-center gap-3 p-2 border-2 border-dashed rounded-lg cursor-pointer transition-all ${
-              isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
-            } ${isProcessing ? "pointer-events-none opacity-60" : ""}`}
+            key={img.id}
+            onClick={() => onSelect(img.id)}
+            className={`h-12 w-16 rounded-lg border overflow-hidden flex-shrink-0 relative cursor-pointer transition-all ${
+              img.id === activeImageId ? "ring-2 ring-primary border-primary" : "border-border hover:border-primary/50"
+            }`}
           >
-            {isProcessing ? (
-              <Loader2 className="h-5 w-5 text-primary animate-spin flex-shrink-0" />
-            ) : (
-              <Upload className="h-5 w-5 text-primary flex-shrink-0" />
+            <img src={img.url} alt="" className="w-full h-full object-cover" />
+            {img.status === "processing" && (
+              <div className="absolute inset-0 bg-background/60 flex items-center justify-center">
+                <Loader2 className="h-3 w-3 text-primary animate-spin" />
+              </div>
             )}
-            <div className="min-w-0">
-              <p className="text-xs font-medium">{isDragging ? "Drop here" : "Upload image or drag & drop"}</p>
-              <p className="text-[10px] text-muted-foreground">PNG, JPG, WEBP · Ctrl+V to paste</p>
-            </div>
+            {img.status === "done" && (
+              <div className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-green-500 border border-background" />
+            )}
+            {img.status === "error" && (
+              <div className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-red-500 border border-background" />
+            )}
+            <button
+              onClick={(e) => { e.stopPropagation(); onRemove(img.id); }}
+              className="absolute top-0 left-0 w-4 h-4 bg-black/60 text-white rounded-br flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
           </div>
+        ))}
+        {images.length > 0 && (
+          <Button variant="ghost" size="sm" onClick={onClearAll} className="h-7 text-[10px] flex-shrink-0 px-2">
+            Clear all
+          </Button>
         )}
-        <input ref={fileInputRef} type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
+        <input ref={fileInputRef} type="file" className="hidden" accept="image/*" multiple onChange={handleFileChange} />
       </div>
     );
   }
@@ -99,64 +120,88 @@ function ImagePanel({ selectedImage, isProcessing, onUpload, onClear, compact }:
   return (
     <div className="h-full flex flex-col p-3 space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Input Image</h3>
-        {selectedImage && (
-          <Button variant="ghost" size="sm" onClick={onClear} className="h-6 text-[10px] px-2">
-            <X className="h-3 w-3 mr-1" /> Clear
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Images {images.length > 0 && <span className="text-primary">({images.length})</span>}
+        </h3>
+        {images.length > 0 && (
+          <Button variant="ghost" size="sm" onClick={onClearAll} className="h-6 text-[10px] px-2">
+            <X className="h-3 w-3 mr-1" /> Clear all
           </Button>
         )}
       </div>
 
+      {/* Upload area */}
       <div
         onClick={() => !isProcessing && fileInputRef.current?.click()}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         className={`
-          relative border-2 border-dashed rounded-xl p-4 text-center cursor-pointer
-          transition-all duration-200 ease-in-out
+          relative border-2 border-dashed rounded-xl p-3 text-center cursor-pointer
+          transition-all duration-200 ease-in-out flex-shrink-0
           ${isDragging ? "border-primary bg-primary/5 scale-[1.02]" : "border-border hover:border-primary/50 hover:bg-muted/30"}
           ${isProcessing ? "pointer-events-none opacity-60" : ""}
         `}
       >
-        {isProcessing ? (
-          <div className="space-y-2">
-            <Loader2 className="mx-auto h-6 w-6 text-primary animate-spin" />
-            <p className="text-xs font-medium text-primary">Processing...</p>
+        <div className="space-y-1">
+          <div className="mx-auto w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+            <Upload className="h-3.5 w-3.5 text-primary" />
           </div>
-        ) : (
-          <div className="space-y-2">
-            <div className="mx-auto w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-              <Upload className="h-4 w-4 text-primary" />
-            </div>
-            <p className="text-xs font-medium">{isDragging ? "Drop here" : "Upload or drag & drop"}</p>
-            <p className="text-[10px] text-muted-foreground">Ctrl+V to paste</p>
-            <div className="flex gap-1 justify-center">
-              {["PNG", "JPG", "WEBP"].map((fmt) => (
-                <span key={fmt} className="text-[9px] px-1 py-0.5 rounded bg-muted text-muted-foreground">{fmt}</span>
-              ))}
-            </div>
-          </div>
-        )}
-        <input ref={fileInputRef} type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
+          <p className="text-[11px] font-medium">{isDragging ? "Drop here" : "Upload or drag & drop"}</p>
+          <p className="text-[9px] text-muted-foreground">PNG, JPG, WEBP · Multiple files · Ctrl+V</p>
+        </div>
+        <input ref={fileInputRef} type="file" className="hidden" accept="image/*" multiple onChange={handleFileChange} />
       </div>
 
-      {selectedImage ? (
-        <div className="flex-1 min-h-0 overflow-auto">
-          <div className="relative rounded-lg border bg-muted/20 overflow-hidden">
-            <img src={selectedImage} alt="Uploaded" className="w-full h-auto object-contain" />
-            {isProcessing && (
-              <div className="absolute inset-0 bg-background/50 flex items-center justify-center">
-                <Loader2 className="h-6 w-6 text-primary animate-spin" />
+      {/* Image gallery */}
+      {images.length > 0 ? (
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="space-y-2 pr-2">
+            {images.map((img) => (
+              <div
+                key={img.id}
+                onClick={() => onSelect(img.id)}
+                className={`relative rounded-lg border overflow-hidden cursor-pointer transition-all group ${
+                  img.id === activeImageId
+                    ? "ring-2 ring-primary border-primary"
+                    : "border-border hover:border-primary/50"
+                }`}
+              >
+                <img src={img.url} alt="" className="w-full h-auto object-contain max-h-32" />
+                {/* Status overlay */}
+                {img.status === "processing" && (
+                  <div className="absolute inset-0 bg-background/50 flex items-center justify-center">
+                    <Loader2 className="h-5 w-5 text-primary animate-spin" />
+                  </div>
+                )}
+                {/* Status badge */}
+                <div className="absolute top-1 left-1">
+                  {img.status === "done" && (
+                    <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/90 text-white font-medium">Done</span>
+                  )}
+                  {img.status === "error" && (
+                    <span className="text-[8px] px-1 py-0.5 rounded bg-red-500/90 text-white font-medium">Error</span>
+                  )}
+                  {img.status === "pending" && (
+                    <span className="text-[8px] px-1 py-0.5 rounded bg-muted/90 text-muted-foreground font-medium">Pending</span>
+                  )}
+                </div>
+                {/* Remove button */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); onRemove(img.id); }}
+                  className="absolute top-1 right-1 w-5 h-5 bg-black/60 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <X className="h-3 w-3" />
+                </button>
               </div>
-            )}
+            ))}
           </div>
-        </div>
+        </ScrollArea>
       ) : (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center space-y-1">
             <ImageIcon className="mx-auto h-10 w-10 text-muted-foreground/20" />
-            <p className="text-[10px] text-muted-foreground">No image</p>
+            <p className="text-[10px] text-muted-foreground">No images</p>
           </div>
         </div>
       )}
@@ -329,7 +374,7 @@ function PreviewPanel({
 // ============================================================
 function ChatPanel() {
   const [messages, setMessages] = useState([
-    { role: "assistant", content: "Hi! How can I help with your math today?" }
+    { role: "assistant", content: "Xin chào! Mình là MathSnap Assistant 🧮 Bạn cần hỗ trợ gì về toán học hôm nay?" }
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -347,19 +392,17 @@ function ChatPanel() {
     setIsLoading(true);
 
     try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIzaSyCwdM4RB-wUA-xxtCYEwideetEegHdNuIk`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: "Answer this math question concisely: " + currentInput }] }],
-          }),
-        }
-      );
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: currentInput }),
+      });
       const data = await response.json();
-      const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
-      setMessages((prev) => [...prev, { role: "assistant", content: aiText }]);
+      if (data.error) {
+        setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${data.error}` }]);
+      } else {
+        setMessages((prev) => [...prev, { role: "assistant", content: data.content }]);
+      }
     } catch {
       setMessages((prev) => [...prev, { role: "assistant", content: "Failed to connect to AI." }]);
     } finally {
@@ -370,8 +413,8 @@ function ChatPanel() {
   return (
     <div className="h-full flex flex-col overflow-hidden bg-card">
       <div className="p-3 border-b">
-        <h3 className="font-medium text-sm">Math Assistant</h3>
-        <p className="text-[10px] text-muted-foreground">Powered by Gemini</p>
+        <h3 className="font-medium text-sm">MathSnap Assistant</h3>
+        <p className="text-[10px] text-muted-foreground">Powered by Llama 3.3 · Mini-CoMER</p>
       </div>
       <ScrollArea className="flex-1 p-3">
         {messages.map((m, i) => (
@@ -415,7 +458,8 @@ function ChatPanel() {
 // ConvertPage — Main page with responsive split layout
 // ============================================================
 export function ConvertPage() {
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [images, setImages] = useState<ImageItem[]>([]);
+  const [activeImageId, setActiveImageId] = useState<string | null>(null);
   const [latexCode, setLatexCode] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeTab, setActiveTab] = useState("code");
@@ -426,35 +470,75 @@ export function ConvertPage() {
   const [wordWrap, setWordWrap] = useState(true);
   const [previewZoom, setPreviewZoom] = useState(100);
 
-  const handleImageUpload = async (file: File) => {
-    const imageUrl = URL.createObjectURL(file);
-    setSelectedImage(imageUrl);
-    setIsProcessing(true);
-    setActiveTab("code");
-
+  const processImage = async (item: ImageItem) => {
+    setImages((prev) => prev.map((img) => img.id === item.id ? { ...img, status: "processing" as const } : img));
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", item.file);
       const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/predict`, {
-        method: "POST",
-        body: formData,
-      });
+      const response = await fetch(`${apiUrl}/predict`, { method: "POST", body: formData });
       if (!response.ok) throw new Error("Backend not responding");
       const data = await response.json();
-      setLatexCode(data.latex);
-      setActiveTab("preview");
-      toast.success("Converted successfully!");
-    } catch (error) {
-      console.error("Upload error:", error);
-      toast.error("Failed to process image. Is the backend running on port 8000?");
-    } finally {
-      setIsProcessing(false);
+      setImages((prev) => prev.map((img) => img.id === item.id ? { ...img, latex: data.latex, status: "done" as const } : img));
+      // If this is the active image, update the code panel
+      setActiveImageId((currentId) => {
+        if (currentId === item.id) setLatexCode(data.latex);
+        return currentId;
+      });
+      toast.success(`Converted: ${item.file.name}`);
+    } catch {
+      setImages((prev) => prev.map((img) => img.id === item.id ? { ...img, status: "error" as const } : img));
+      toast.error(`Failed: ${item.file.name}`);
     }
   };
 
-  const handleClear = () => {
-    setSelectedImage(null);
+  const handleImageUpload = async (files: File[]) => {
+    const newItems: ImageItem[] = files.map((file) => ({
+      id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      url: URL.createObjectURL(file),
+      file,
+      latex: "",
+      status: "pending" as const,
+    }));
+
+    setImages((prev) => [...prev, ...newItems]);
+    // Select the first new image if nothing selected
+    if (!activeImageId) {
+      setActiveImageId(newItems[0].id);
+    }
+    setActiveTab("code");
+    setIsProcessing(true);
+
+    // Process all images sequentially
+    for (const item of newItems) {
+      await processImage(item);
+    }
+    setIsProcessing(false);
+    setActiveTab("preview");
+  };
+
+  const handleSelectImage = (id: string) => {
+    setActiveImageId(id);
+    const img = images.find((i) => i.id === id);
+    if (img) setLatexCode(img.latex);
+  };
+
+  const handleRemoveImage = (id: string) => {
+    setImages((prev) => {
+      const updated = prev.filter((img) => img.id !== id);
+      if (activeImageId === id) {
+        const next = updated[0] || null;
+        setActiveImageId(next?.id || null);
+        setLatexCode(next?.latex || "");
+      }
+      return updated;
+    });
+  };
+
+  const handleClearAll = () => {
+    images.forEach((img) => URL.revokeObjectURL(img.url));
+    setImages([]);
+    setActiveImageId(null);
     setLatexCode("");
     setActiveTab("code");
   };
@@ -464,22 +548,32 @@ export function ConvertPage() {
     toast.success("LaTeX copied to clipboard!");
   };
 
+  // Sync latexCode edits back to active image
+  const handleCodeChange = (code: string) => {
+    setLatexCode(code);
+    if (activeImageId) {
+      setImages((prev) => prev.map((img) => img.id === activeImageId ? { ...img, latex: code } : img));
+    }
+  };
+
   // Paste listener
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
+      const files: File[] = [];
       const items = event.clipboardData?.items;
       if (items) {
         for (let i = 0; i < items.length; i++) {
           if (items[i].type.indexOf("image") !== -1) {
             const file = items[i].getAsFile();
-            if (file) handleImageUpload(file);
+            if (file) files.push(file);
           }
         }
       }
+      if (files.length > 0) handleImageUpload(files);
     };
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, []);
+  }, [activeImageId]);
 
   return (
     <div className="h-[calc(100vh-3.5rem)] pb-14 md:pb-0 flex flex-col overflow-hidden">
@@ -488,10 +582,13 @@ export function ConvertPage() {
       <div className="md:hidden flex flex-col flex-1 min-h-0">
         {/* Compact image upload strip */}
         <ImagePanel
-          selectedImage={selectedImage}
+          images={images}
+          activeImageId={activeImageId}
           isProcessing={isProcessing}
           onUpload={handleImageUpload}
-          onClear={handleClear}
+          onSelect={handleSelectImage}
+          onRemove={handleRemoveImage}
+          onClearAll={handleClearAll}
           compact
         />
 
@@ -518,7 +615,7 @@ export function ConvertPage() {
               ) : (
                 <Textarea
                   value={latexCode}
-                  onChange={(e) => setLatexCode(e.target.value)}
+                  onChange={(e) => handleCodeChange(e.target.value)}
                   placeholder="LaTeX code will appear here..."
                   className="h-full font-mono text-xs resize-none bg-muted/20 border-muted"
                   style={{ fontSize: `${fontSize}px` }}
@@ -549,51 +646,69 @@ export function ConvertPage() {
       <div className="hidden md:flex lg:hidden flex-col flex-1 min-h-0">
         {/* Compact image upload strip */}
         <ImagePanel
-          selectedImage={selectedImage}
+          images={images}
+          activeImageId={activeImageId}
           isProcessing={isProcessing}
           onUpload={handleImageUpload}
-          onClear={handleClear}
+          onSelect={handleSelectImage}
+          onRemove={handleRemoveImage}
+          onClearAll={handleClearAll}
           compact
         />
 
-        {/* Side-by-side code + preview */}
-        <div className="flex-1 flex min-h-0">
-          <CodePanel
-            latexCode={latexCode}
-            onCodeChange={setLatexCode}
-            isProcessing={isProcessing}
-            fontSize={fontSize}
-            onFontSizeChange={setFontSize}
-            wordWrap={wordWrap}
-            onWordWrapToggle={() => setWordWrap(!wordWrap)}
-            onCopy={handleCopyLatex}
-          />
-          <PreviewPanel
-            latexCode={latexCode}
-            isProcessing={isProcessing}
-            zoom={previewZoom}
-            onZoomChange={setPreviewZoom}
-          />
-        </div>
+        {/* Side-by-side code + preview (resizable) */}
+        <ResizablePanelGroup direction="horizontal" className="flex-1 min-h-0">
+          <ResizablePanel defaultSize={50} minSize={25}>
+            <CodePanel
+              latexCode={latexCode}
+              onCodeChange={handleCodeChange}
+              isProcessing={isProcessing}
+              fontSize={fontSize}
+              onFontSizeChange={setFontSize}
+              wordWrap={wordWrap}
+              onWordWrapToggle={() => setWordWrap(!wordWrap)}
+              onCopy={handleCopyLatex}
+            />
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel defaultSize={50} minSize={25}>
+            <PreviewPanel
+              latexCode={latexCode}
+              isProcessing={isProcessing}
+              zoom={previewZoom}
+              onZoomChange={setPreviewZoom}
+            />
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
 
-      {/* ===== DESKTOP (≥ lg): Sidebar image + side-by-side code/preview ===== */}
-      <div className="hidden lg:flex flex-1 min-h-0">
+      {/* ===== DESKTOP (≥ lg): Resizable panels ===== */}
+      <ResizablePanelGroup
+        key={chatOpen ? "chat-open" : "chat-closed"}
+        direction="horizontal"
+        className="hidden lg:flex flex-1 min-h-0"
+      >
         {/* Left: Image sidebar */}
-        <div className="w-64 xl:w-72 border-r border-border bg-card flex-shrink-0">
-          <ImagePanel
-            selectedImage={selectedImage}
-            isProcessing={isProcessing}
-            onUpload={handleImageUpload}
-            onClear={handleClear}
-          />
-        </div>
+        <ResizablePanel defaultSize={chatOpen ? 16 : 18} minSize={10} maxSize={30}>
+          <div className="h-full border-r border-border bg-card">
+            <ImagePanel
+              images={images}
+              activeImageId={activeImageId}
+              isProcessing={isProcessing}
+              onUpload={handleImageUpload}
+              onSelect={handleSelectImage}
+              onRemove={handleRemoveImage}
+              onClearAll={handleClearAll}
+            />
+          </div>
+        </ResizablePanel>
+        <ResizableHandle withHandle />
 
-        {/* Center + Right: Code + Preview side-by-side */}
-        <div className="flex-1 flex min-h-0 min-w-0">
+        {/* Center: Code panel */}
+        <ResizablePanel defaultSize={chatOpen ? 32 : 41} minSize={20}>
           <CodePanel
             latexCode={latexCode}
-            onCodeChange={setLatexCode}
+            onCodeChange={handleCodeChange}
             isProcessing={isProcessing}
             fontSize={fontSize}
             onFontSizeChange={setFontSize}
@@ -601,21 +716,31 @@ export function ConvertPage() {
             onWordWrapToggle={() => setWordWrap(!wordWrap)}
             onCopy={handleCopyLatex}
           />
+        </ResizablePanel>
+        <ResizableHandle withHandle />
+
+        {/* Right: Preview panel */}
+        <ResizablePanel defaultSize={chatOpen ? 32 : 41} minSize={20}>
           <PreviewPanel
             latexCode={latexCode}
             isProcessing={isProcessing}
             zoom={previewZoom}
             onZoomChange={setPreviewZoom}
           />
-        </div>
+        </ResizablePanel>
 
-        {/* Chat sidebar (collapsible) */}
+        {/* Chat sidebar (resizable, collapsible) */}
         {chatOpen && (
-          <div className="w-72 border-l border-border bg-card flex-shrink-0 animate-in slide-in-from-right-5 duration-200">
-            <ChatPanel />
-          </div>
+          <>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={20} minSize={15} maxSize={40}>
+              <div className="h-full border-l border-border bg-card">
+                <ChatPanel />
+              </div>
+            </ResizablePanel>
+          </>
         )}
-      </div>
+      </ResizablePanelGroup>
 
       {/* Chat toggle — Desktop */}
       <Button
