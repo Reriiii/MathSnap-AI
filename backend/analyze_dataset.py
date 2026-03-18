@@ -6,10 +6,8 @@ category breakdowns, dataset sources, and formula complexity.
 
 import csv
 import json
-import math
 import os
 import re
-import random
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -300,74 +298,61 @@ def analyze():
 
 
 # ============================================================
-# Generate realistic synthetic training metrics
+# Generate training metrics from real outputs/history.json
 # ============================================================
+HISTORY_PATH = PROJECT_ROOT / "outputs" / "history.json"
+
+
 def generate_training_metrics():
-    random.seed(42)
-    total_epochs = 300
-    trained_epochs = 230
-    best_epoch = 194
-    best_exprate = 47.12
+    with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+        history = json.load(f)
 
-    # LR events
-    lr_events = [
-        {"epoch": 0, "newLr": 1e-4, "reason": "Initial"},
-        {"epoch": 82, "newLr": 5e-5, "reason": "Plateau detected (patience=10)"},
-        {"epoch": 131, "newLr": 2.5e-5, "reason": "Plateau detected"},
-        {"epoch": 176, "newLr": 1.25e-5, "reason": "Plateau detected"},
-        {"epoch": 211, "newLr": 6.25e-6, "reason": "Plateau detected"},
-    ]
+    train_losses = history["train_loss"]
+    lrs = history["lr"]
+    trained_epochs = len(train_losses)
 
-    def get_lr(epoch):
-        lr = 1e-4
-        for ev in lr_events:
-            if epoch >= ev["epoch"]:
-                lr = ev["newLr"]
-        return lr
+    # Average val loss and exprate across CROHME 2014/2016/2019
+    val_loss_keys = ["2014_val_loss", "2016_val_loss", "2019_val_loss"]
+    exprate_keys = ["2014_exprate", "2016_exprate", "2019_exprate"]
 
+    # Detect LR change events
+    lr_events = [{"epoch": 1, "newLr": lrs[0], "reason": "Initial"}]
+    for i in range(1, len(lrs)):
+        if lrs[i] != lrs[i - 1]:
+            lr_events.append({
+                "epoch": i + 1,
+                "newLr": lrs[i],
+                "reason": "Plateau detected",
+            })
+
+    # Build per-epoch records
     epochs = []
-    for ep in range(1, trained_epochs + 1):
-        t = ep / trained_epochs
+    best_epoch = 1
+    best_exprate = 0.0
 
-        # Training loss: exponential decay + noise
-        base_train_loss = 4.2 * math.exp(-4.0 * t) + 0.65
-        # Extra drops at LR events
-        for ev in lr_events[1:]:
-            if ep > ev["epoch"]:
-                drop = 0.08 * math.exp(-0.02 * (ep - ev["epoch"]))
-                base_train_loss -= drop
-        noise = random.gauss(0, 0.025)
-        train_loss = max(0.3, base_train_loss + noise)
+    for i in range(trained_epochs):
+        val_loss = sum(history[k][i] for k in val_loss_keys) / len(val_loss_keys)
+        exprate = sum(history[k][i] for k in exprate_keys) / len(exprate_keys)
 
-        # Validation loss: slightly higher, diverges late
-        val_offset = 0.05 + 0.15 * t  # grows with time (mild overfitting)
-        val_noise = random.gauss(0, 0.04)
-        val_loss = max(0.35, train_loss + val_offset + val_noise)
-
-        # ExpRate: sigmoid-like curve peaking at best_epoch
-        if ep <= best_epoch:
-            progress = ep / best_epoch
-            exprate = best_exprate * (1 - math.exp(-3.5 * progress))
-        else:
-            decay = 0.3 * (ep - best_epoch) / (trained_epochs - best_epoch)
-            exprate = best_exprate - decay + random.gauss(0, 0.3)
-        exprate = max(0, min(50, exprate + random.gauss(0, 0.4)))
-
-        lr = get_lr(ep)
+        if exprate > best_exprate:
+            best_exprate = exprate
+            best_epoch = i + 1
 
         epochs.append({
-            "epoch": ep,
-            "trainLoss": round(train_loss, 4),
+            "epoch": i + 1,
+            "trainLoss": round(train_losses[i], 4),
             "valLoss": round(val_loss, 4),
             "expRate": round(exprate, 2),
-            "lr": lr,
+            "lr": lrs[i],
         })
+
+    best_exprate = round(best_exprate, 2)
 
     result = {
         "epochs": epochs,
         "bestEpoch": best_epoch,
         "bestExpRate": best_exprate,
-        "totalEpochs": total_epochs,
+        "totalEpochs": trained_epochs,
         "trainedEpochs": trained_epochs,
         "lrEvents": lr_events,
     }
@@ -376,6 +361,7 @@ def generate_training_metrics():
     with open(TRAINING_OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"Training metrics written to {TRAINING_OUTPUT_PATH}")
+    print(f"  {trained_epochs} epochs, best ExpRate: {best_exprate}% at epoch {best_epoch}")
 
 
 if __name__ == "__main__":
