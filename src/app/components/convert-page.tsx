@@ -475,8 +475,7 @@ export function ConvertPage() {
     try {
       const formData = new FormData();
       formData.append("file", item.file);
-      const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/predict`, { method: "POST", body: formData });
+      const response = await fetch("/api/predict", { method: "POST", body: formData });
       if (!response.ok) throw new Error("Backend not responding");
       const data = await response.json();
       setImages((prev) => prev.map((img) => img.id === item.id ? { ...img, latex: data.latex, status: "done" as const } : img));
