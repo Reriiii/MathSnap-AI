@@ -14,6 +14,7 @@ Pipeline:
 
 import os
 import csv
+import random
 import numpy as np
 from typing import List, Dict, Optional
 
@@ -23,6 +24,7 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 from PIL import Image
 
 from data.vocab import Vocab
+from data import augmentations as aug
 
 
 class ScaleAugmentation:
@@ -136,6 +138,8 @@ class CROHMEDataset(Dataset):
         max_seq_len: int = 200,
         augment: bool = False,
         scale_aug: bool = True,
+        # optional extra image-level augmentations (offline pixel/geometric)
+        image_aug: bool = False,
         scale_lo: float = 0.7,
         scale_hi: float = 1.4,
         h_lo: int = 16,
@@ -155,6 +159,9 @@ class CROHMEDataset(Dataset):
         self.scale_aug = None
         if augment and scale_aug:
             self.scale_aug = ScaleAugmentation(scale_lo, scale_hi)
+
+        # Extra image augmentation toggle (does not change existing defaults)
+        self.image_aug = image_aug and augment
 
         self.scale_limit = ScaleToLimitRange(w_lo, w_hi, h_lo, h_hi)
 
@@ -269,6 +276,40 @@ class CROHMEDataset(Dataset):
             img = self.scale_aug(img)
         img = self.scale_limit(img)
 
+        # Additional pixel/geometric augmentations (optional)
+        if self.image_aug:
+            # small affine (translation/scale/limited rotation)
+            if np.random.rand() < 0.9:
+                img = aug.random_affine_small(img)
+
+            # elastic deformation sometimes
+            if np.random.rand() < 0.5:
+                img = aug.elastic_transform(img, alpha=np.random.uniform(20, 40), sigma=np.random.uniform(4, 8))
+
+            # blur variants
+            if np.random.rand() < 0.3:
+                img = aug.gaussian_blur(img)
+            if np.random.rand() < 0.15:
+                img = aug.motion_blur(img, degree=random.randint(5, 12))
+
+            # random erasing / cutout
+            img = aug.random_erasing(img, p=0.5)
+
+            # pairwise intensity transfer with another random sample
+            if np.random.rand() < 0.2:
+                j = np.random.randint(0, len(self.entries))
+                other = self._image_cache[j]
+                img = aug.pairwise_intensity_transfer(img, other)
+
+            # Mixup / CutMix with small probability
+            if np.random.rand() < 0.05:
+                j = np.random.randint(0, len(self.entries))
+                other = self._image_cache[j]
+                if np.random.rand() < 0.5:
+                    img = aug.mixup(img, other)
+                else:
+                    img = aug.cutmix(img, other)
+
         # To tensor [1, H, W] in [0, 1]
         img_tensor = torch.from_numpy(img).float().unsqueeze(0) / 255.0
 
@@ -339,8 +380,9 @@ def get_dataloader(
         dataset = CROHMEDataset(
             vocab=vocab,
             max_seq_len=config.data.max_seq_len,
-            augment=(is_train and config.data.augment),
-            scale_aug=config.data.scale_aug,
+                augment=(is_train and config.data.augment),
+                scale_aug=config.data.scale_aug,
+                image_aug=(is_train and config.data.image_aug),
             scale_lo=config.data.scale_lo,
             scale_hi=config.data.scale_hi,
             h_lo=config.data.h_lo,
@@ -356,7 +398,8 @@ def get_dataloader(
         dataset = CROHMEDataset(
             vocab=vocab,
             max_seq_len=config.data.max_seq_len,
-            augment=(is_train and config.data.augment),
+                augment=(is_train and config.data.augment),
+                image_aug=(is_train and config.data.image_aug),
             csv_path=csv_path,
         )
 
