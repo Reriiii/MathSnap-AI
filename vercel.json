@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npx vite build",
+  "buildCommand": "VITE_API_URL=$API_URL npx vite build",
   "outputDirectory": "dist",
   "framework": "vite",
   "rewrites": [

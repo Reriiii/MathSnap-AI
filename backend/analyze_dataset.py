@@ -311,9 +311,8 @@ def generate_training_metrics():
     lrs = history["lr"]
     trained_epochs = len(train_losses)
 
-    # Average val loss and exprate across CROHME 2014/2016/2019
-    val_loss_keys = ["2014_val_loss", "2016_val_loss", "2019_val_loss"]
-    exprate_keys = ["2014_exprate", "2016_exprate", "2019_exprate"]
+    years = ["2014", "2016", "2019"]
+    val_loss_keys = [f"{y}_val_loss" for y in years]
 
     # Detect LR change events
     lr_events = [{"epoch": 1, "newLr": lrs[0], "reason": "Initial"}]
@@ -325,28 +324,48 @@ def generate_training_metrics():
                 "reason": "Plateau detected",
             })
 
-    # Build per-epoch records
+    # Build per-epoch records with per-year metrics
     epochs = []
     best_epoch = 1
     best_exprate = 0.0
 
     for i in range(trained_epochs):
         val_loss = sum(history[k][i] for k in val_loss_keys) / len(val_loss_keys)
-        exprate = sum(history[k][i] for k in exprate_keys) / len(exprate_keys)
+        avg_exprate = sum(history[f"{y}_exprate"][i] for y in years) / len(years)
 
-        if exprate > best_exprate:
-            best_exprate = exprate
+        if avg_exprate > best_exprate:
+            best_exprate = avg_exprate
             best_epoch = i + 1
 
-        epochs.append({
+        record = {
             "epoch": i + 1,
             "trainLoss": round(train_losses[i], 4),
             "valLoss": round(val_loss, 4),
-            "expRate": round(exprate, 2),
+            "expRate": round(avg_exprate, 2),
             "lr": lrs[i],
-        })
+        }
+
+        # Per-year metrics
+        for y in years:
+            record[f"expRate_{y}"] = round(history[f"{y}_exprate"][i], 2)
+            record[f"expRate1_{y}"] = round(history[f"{y}_exprate_1"][i], 2)
+            record[f"expRate2_{y}"] = round(history[f"{y}_exprate_2"][i], 2)
+            record[f"bleu4_{y}"] = round(history[f"{y}_bleu_4"][i], 2)
+
+        epochs.append(record)
 
     best_exprate = round(best_exprate, 2)
+
+    # Per-year best ExpRate
+    per_year_best = {}
+    for y in years:
+        vals = history[f"{y}_exprate"]
+        best_val = max(vals)
+        best_ep = vals.index(best_val) + 1
+        per_year_best[y] = {
+            "bestExpRate": round(best_val, 2),
+            "bestEpoch": best_ep,
+        }
 
     result = {
         "epochs": epochs,
@@ -355,6 +374,7 @@ def generate_training_metrics():
         "totalEpochs": trained_epochs,
         "trainedEpochs": trained_epochs,
         "lrEvents": lr_events,
+        "perYearBest": per_year_best,
     }
 
     os.makedirs(TRAINING_OUTPUT_PATH.parent, exist_ok=True)
@@ -362,6 +382,9 @@ def generate_training_metrics():
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"Training metrics written to {TRAINING_OUTPUT_PATH}")
     print(f"  {trained_epochs} epochs, best ExpRate: {best_exprate}% at epoch {best_epoch}")
+    for y in years:
+        info = per_year_best[y]
+        print(f"  CROHME {y}: best {info['bestExpRate']}% at epoch {info['bestEpoch']}")
 
 
 if __name__ == "__main__":

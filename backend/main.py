@@ -67,6 +67,9 @@ def preprocess_image(pil_image: Image.Image) -> tuple:
     Training uses: black background, white foreground, grayscale,
     variable size within h_hi x w_hi bounds.
 
+    Handles diverse inputs: photos of paper, colored backgrounds,
+    low contrast, noise, etc.
+
     Returns:
         img_tensor: [1, 1, H, W] float32
         mask_tensor: [1, H, W] bool (False = valid, True = padding)
@@ -74,10 +77,26 @@ def preprocess_image(pil_image: Image.Image) -> tuple:
     # Convert to grayscale numpy
     img = np.array(pil_image.convert("L"))  # [H, W] uint8
 
-    # Binarize with Otsu
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # --- Noise reduction ---
+    img = cv2.GaussianBlur(img, (3, 3), 0)
 
-    # Detect background from border pixels
+    # --- Adaptive thresholding (handles uneven lighting from photos) ---
+    # Try adaptive first, fall back to Otsu
+    adaptive = cv2.adaptiveThreshold(
+        img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, blockSize=31, C=10
+    )
+
+    # Also compute Otsu for comparison
+    _, otsu = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Use adaptive if image has uneven lighting (high std in local means),
+    # otherwise use Otsu (cleaner for screenshots)
+    local_means = cv2.blur(img, (64, 64))
+    lighting_variation = np.std(local_means)
+    binary = adaptive if lighting_variation > 15 else otsu
+
+    # --- Detect and normalize background ---
     h, w = binary.shape
     border = np.concatenate([
         binary[0, :], binary[-1, :],
@@ -85,11 +104,27 @@ def preprocess_image(pil_image: Image.Image) -> tuple:
     ])
     bg_is_white = np.mean(border) > 128
 
-    # Ensure black background, white foreground (matching CoMER training data)
+    # Ensure black background, white foreground (matching training data)
     if bg_is_white:
         binary = 255 - binary
 
-    # Scale to fit within bounds (preserve aspect ratio)
+    # --- Remove small noise blobs ---
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+    # --- Crop to content (remove excess border) ---
+    coords = cv2.findNonZero(binary)
+    if coords is not None:
+        x, y, cw, ch = cv2.boundingRect(coords)
+        pad = 8  # small padding around content
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w, x + cw + pad)
+        y2 = min(h, y + ch + pad)
+        binary = binary[y1:y2, x1:x2]
+
+    # --- Scale to fit within bounds (preserve aspect ratio) ---
+    h, w = binary.shape
     h_hi, w_hi = config.data.h_hi, config.data.w_hi
     scale = min(h_hi / h, w_hi / w, 1.0)
     if scale < 1.0:

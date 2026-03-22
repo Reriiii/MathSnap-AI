@@ -3,15 +3,9 @@
   "configurations": [
     {
       "name": "frontend",
-      "runtimeExecutable": "C:\\Program Files\\nodejs\\node.exe",
-      "runtimeArgs": ["D:\\Workplace\\hmer\\node_modules\\vite\\bin\\vite.js"],
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/vite/bin/vite.js", "--port", "5173"],
       "port": 5173
-    },
-    {
-      "name": "backend",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["D:\\Workplace\\hmer\\backend\\main.py"],
-      "port": 8000
     }
   ]
 }

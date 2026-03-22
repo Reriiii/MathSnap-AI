@@ -395,7 +395,7 @@ function ChatPanel() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: currentInput }),
+        body: JSON.stringify({ message: currentInput, history: messages }),
       });
       const data = await response.json();
       if (data.error) {
@@ -416,7 +416,7 @@ function ChatPanel() {
         <h3 className="font-medium text-sm">MathSnap Assistant</h3>
         <p className="text-[10px] text-muted-foreground">Powered by Llama 3.3 · Mini-CoMER</p>
       </div>
-      <ScrollArea className="flex-1 p-3">
+      <ScrollArea className="flex-1 min-h-0 p-3">
         {messages.map((m, i) => (
           <div key={i} className={`mb-2 flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`p-2.5 rounded-lg text-xs max-w-[85%] ${
