@@ -146,10 +146,13 @@ function KPICard({
 // ============================================================
 function OverviewTab({ onTabChange }: { onTabChange: (tab: string) => void }) {
   const totalSamples = useAnimatedCounter(datasetStats.totalSamples);
-  const vocabSize = useAnimatedCounter(114);
+  const vocabSize = useAnimatedCounter(datasetStats.tokenFrequency.length + 4);
   const params = useAnimatedCounter(639, 1000);
-  const expRate = useAnimatedCounter(4712, 1400);
-  const epochs = useAnimatedCounter(230, 1000);
+  const bestExpRateVal = Math.round(trainingMetrics.bestExpRate * 100);
+  const expRate = useAnimatedCounter(bestExpRateVal, 1400);
+  const trainedEpochs = trainingMetrics.trainedEpochs;
+  const totalEpochs = trainingMetrics.totalEpochs;
+  const epochs = useAnimatedCounter(trainedEpochs, 1000);
 
   const splitDonutData = datasetStats.splits.map((s: any) => ({
     name: s.name,
@@ -172,10 +175,10 @@ function OverviewTab({ onTabChange }: { onTabChange: (tab: string) => void }) {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
         <KPICard icon={Database} label="Total Samples" value={totalSamples.toLocaleString()} subtitle="CROHME 2013/2016/2019" color="bg-blue-500" delay={0} />
-        <KPICard icon={BookOpen} label="Vocabulary" value={`${vocabSize}`} subtitle="110 LaTeX + 4 special" color="bg-teal-500" delay={0.08} />
+        <KPICard icon={BookOpen} label="Vocabulary" value={`${vocabSize}`} subtitle={`${datasetStats.tokenFrequency.length} LaTeX + 4 special`} color="bg-teal-500" delay={0.08} />
         <KPICard icon={Cpu} label="Parameters" value={`${(params / 100).toFixed(2)}M`} subtitle="DenseNet + Transformer" color="bg-purple-500" delay={0.16} />
-        <KPICard icon={Target} label="Best ExpRate" value={`${(expRate / 100).toFixed(2)}%`} subtitle="Epoch 194 / 300" color="bg-emerald-500" delay={0.24} />
-        <KPICard icon={Timer} label="Training" value={`${epochs}/300`} subtitle={`${((epochs / 300) * 100).toFixed(1)}% complete`} color="bg-amber-500" delay={0.32} />
+        <KPICard icon={Target} label="Best ExpRate" value={`${(expRate / 100).toFixed(2)}%`} subtitle={`Epoch ${trainingMetrics.bestEpoch} / ${totalEpochs}`} color="bg-emerald-500" delay={0.24} />
+        <KPICard icon={Timer} label="Training" value={`${epochs}/${totalEpochs}`} subtitle={`${((epochs / totalEpochs) * 100).toFixed(1)}% complete`} color="bg-amber-500" delay={0.32} />
       </div>
 
       {/* Mini Preview Charts */}
@@ -814,30 +817,15 @@ function ModelTab() {
 // ============================================================
 // Training Tab
 // ============================================================
-const YEAR_COLORS: Record<string, string> = {
-  "2014": "#3b82f6",
-  "2016": "#8b5cf6",
-  "2019": "#10b981",
-};
-
-const METRIC_COLORS: Record<string, string> = {
-  expRate: "#ef4444",
-  expRate1: "#f59e0b",
-  expRate2: "#3b82f6",
-  bleu4: "#10b981",
-};
-
 function TrainingTab() {
   const [showLoss, setShowLoss] = useState(true);
   const [showExpRate, setShowExpRate] = useState(true);
   const [showLR, setShowLR] = useState(true);
-  const [selectedYear, setSelectedYear] = useState<string>("all");
 
   const epochs = trainingMetrics.epochs || [];
   const lrEvents = trainingMetrics.lrEvents || [];
-  const bestEpoch = trainingMetrics.bestEpoch || 195;
+  const bestEpoch = trainingMetrics.bestEpoch || 194;
   const bestExpRate = trainingMetrics.bestExpRate || 47.12;
-  const perYearBest = (trainingMetrics as any).perYearBest || {};
 
   // Downsample for performance
   const lossData = epochs.filter((_: any, i: number) => i % 2 === 0);
@@ -845,6 +833,10 @@ function TrainingTab() {
   const lossConfig: ChartConfig = {
     trainLoss: { label: "Train Loss", color: "var(--chart-1)" },
     valLoss: { label: "Val Loss", color: "var(--chart-5)" },
+  };
+
+  const expRateConfig: ChartConfig = {
+    expRate: { label: "ExpRate %", color: "var(--chart-2)" },
   };
 
   const lrConfig: ChartConfig = {
@@ -855,8 +847,6 @@ function TrainingTab() {
   const lastEpoch = epochs[epochs.length - 1];
   const bestLossEpoch = epochs.reduce((best: any, e: any) =>
     e.valLoss < best.valLoss ? e : best, epochs[0]);
-
-  const years = ["2014", "2016", "2019"];
 
   return (
     <div className="space-y-4">
@@ -917,139 +907,32 @@ function TrainingTab() {
         </Card>
       )}
 
-      {/* Per-Year ExpRate Section */}
+      {/* ExpRate Curve */}
       {showExpRate && (
-        <>
-          {/* Year selector */}
-          <Card>
-            <CardContent className="p-3 flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium text-muted-foreground">CROHME Year:</span>
-              <Button
-                variant={selectedYear === "all" ? "default" : "outline"}
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => setSelectedYear("all")}
-              >
-                All Years
-              </Button>
-              {years.map(y => (
-                <Button
-                  key={y}
-                  variant={selectedYear === y ? "default" : "outline"}
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => setSelectedYear(y)}
-                >
-                  CROHME {y}
-                </Button>
-              ))}
-            </CardContent>
-          </Card>
-
-          {selectedYear === "all" ? (
-            /* All years ExpRate comparison */
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">ExpRate by CROHME Year</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ChartContainer config={{
-                  expRate_2014: { label: "CROHME 2014", color: YEAR_COLORS["2014"] },
-                  expRate_2016: { label: "CROHME 2016", color: YEAR_COLORS["2016"] },
-                  expRate_2019: { label: "CROHME 2019", color: YEAR_COLORS["2019"] },
-                }} className="h-[300px] w-full">
-                  <LineChart data={lossData} margin={{ top: 5, right: 10, bottom: 5, left: 10 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="epoch" tick={{ fontSize: 10 }} label={{ value: "Epoch", position: "insideBottom", offset: -2, fontSize: 10 }} />
-                    <YAxis tick={{ fontSize: 10 }} domain={[0, 55]} label={{ value: "ExpRate %", angle: -90, position: "insideLeft", fontSize: 10 }} />
-                    {years.map(y => (
-                      <Line key={y} type="monotone" dataKey={`expRate_${y}`} stroke={YEAR_COLORS[y]} strokeWidth={1.5} dot={false} />
-                    ))}
-                    {years.map(y => perYearBest[y] && (
-                      <ReferenceDot key={`best-${y}`} x={perYearBest[y].bestEpoch} y={perYearBest[y].bestExpRate} r={4} fill={YEAR_COLORS[y]} stroke="var(--background)" strokeWidth={2} />
-                    ))}
-                    <ChartTooltip content={<ChartTooltipContent />} />
-                    <ChartLegend content={<ChartLegendContent />} />
-                  </LineChart>
-                </ChartContainer>
-                {/* Per-year best badges */}
-                <div className="flex flex-wrap gap-2 mt-3">
-                  {years.map(y => perYearBest[y] && (
-                    <Badge key={y} variant="outline" className="text-[10px]" style={{ borderColor: YEAR_COLORS[y], color: YEAR_COLORS[y] }}>
-                      {y}: {perYearBest[y].bestExpRate}% (Ep {perYearBest[y].bestEpoch})
-                    </Badge>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          ) : (
-            /* Single year: all metrics */
-            <>
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">CROHME {selectedYear} — All Metrics</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <ChartContainer config={{
-                    [`expRate_${selectedYear}`]: { label: "ExpRate", color: METRIC_COLORS.expRate },
-                    [`expRate1_${selectedYear}`]: { label: "ExpRate \u22641", color: METRIC_COLORS.expRate1 },
-                    [`expRate2_${selectedYear}`]: { label: "ExpRate \u22642", color: METRIC_COLORS.expRate2 },
-                    [`bleu4_${selectedYear}`]: { label: "BLEU-4", color: METRIC_COLORS.bleu4 },
-                  }} className="h-[320px] w-full">
-                    <LineChart data={lossData} margin={{ top: 5, right: 10, bottom: 5, left: 10 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="epoch" tick={{ fontSize: 10 }} label={{ value: "Epoch", position: "insideBottom", offset: -2, fontSize: 10 }} />
-                      <YAxis tick={{ fontSize: 10 }} domain={[0, 85]} label={{ value: "%", angle: -90, position: "insideLeft", fontSize: 10 }} />
-                      <Line type="monotone" dataKey={`expRate_${selectedYear}`} stroke={METRIC_COLORS.expRate} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey={`expRate1_${selectedYear}`} stroke={METRIC_COLORS.expRate1} strokeWidth={1.5} dot={false} />
-                      <Line type="monotone" dataKey={`expRate2_${selectedYear}`} stroke={METRIC_COLORS.expRate2} strokeWidth={1.5} dot={false} />
-                      <Line type="monotone" dataKey={`bleu4_${selectedYear}`} stroke={METRIC_COLORS.bleu4} strokeWidth={1.5} dot={false} />
-                      {perYearBest[selectedYear] && (
-                        <ReferenceDot x={perYearBest[selectedYear].bestEpoch} y={perYearBest[selectedYear].bestExpRate} r={5} fill={METRIC_COLORS.expRate} stroke="var(--background)" strokeWidth={2} />
-                      )}
-                      <ChartTooltip
-                        content={({ active, payload }) => {
-                          if (!active || !payload?.length) return null;
-                          const d = payload[0].payload;
-                          return (
-                            <div className="bg-background border rounded-lg px-3 py-2 shadow-lg text-xs space-y-1">
-                              <p className="font-medium">Epoch {d.epoch}</p>
-                              <p style={{ color: METRIC_COLORS.expRate }}>ExpRate: <span className="font-mono">{d[`expRate_${selectedYear}`]}%</span></p>
-                              <p style={{ color: METRIC_COLORS.expRate1 }}>ExpRate ≤1: <span className="font-mono">{d[`expRate1_${selectedYear}`]}%</span></p>
-                              <p style={{ color: METRIC_COLORS.expRate2 }}>ExpRate ≤2: <span className="font-mono">{d[`expRate2_${selectedYear}`]}%</span></p>
-                              <p style={{ color: METRIC_COLORS.bleu4 }}>BLEU-4: <span className="font-mono">{d[`bleu4_${selectedYear}`]}%</span></p>
-                            </div>
-                          );
-                        }}
-                      />
-                      <ChartLegend content={<ChartLegendContent />} />
-                    </LineChart>
-                  </ChartContainer>
-                  {/* Best values for selected year */}
-                  {perYearBest[selectedYear] && (
-                    <div className="grid grid-cols-4 gap-2 mt-3">
-                      {[
-                        { label: "ExpRate", key: `expRate_${selectedYear}`, color: METRIC_COLORS.expRate },
-                        { label: "ExpRate ≤1", key: `expRate1_${selectedYear}`, color: METRIC_COLORS.expRate1 },
-                        { label: "ExpRate ≤2", key: `expRate2_${selectedYear}`, color: METRIC_COLORS.expRate2 },
-                        { label: "BLEU-4", key: `bleu4_${selectedYear}`, color: METRIC_COLORS.bleu4 },
-                      ].map(m => {
-                        const best = epochs.reduce((b: any, e: any) => (e[m.key] > b[m.key] ? e : b), epochs[0]);
-                        return (
-                          <div key={m.key} className="text-center p-2 rounded-lg bg-muted/50">
-                            <p className="text-lg font-bold font-mono" style={{ color: m.color }}>{best[m.key]}%</p>
-                            <p className="text-[10px] text-muted-foreground">{m.label}</p>
-                            <p className="text-[10px] text-muted-foreground">Epoch {best.epoch}</p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </>
-          )}
-        </>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Expression Recognition Rate (ExpRate)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ChartContainer config={expRateConfig} className="h-[280px] w-full">
+              <AreaChart data={lossData} margin={{ top: 5, right: 10, bottom: 5, left: 10 }}>
+                <defs>
+                  <linearGradient id="expRateArea" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--chart-2)" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="var(--chart-2)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="epoch" tick={{ fontSize: 10 }} label={{ value: "Epoch", position: "insideBottom", offset: -2, fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 10 }} domain={[0, 55]} label={{ value: "ExpRate %", angle: -90, position: "insideLeft", fontSize: 10 }} />
+                <Area type="monotone" dataKey="expRate" stroke="var(--chart-2)" fill="url(#expRateArea)" strokeWidth={2} dot={false} />
+                <ReferenceLine y={bestExpRate} stroke="var(--chart-2)" strokeDasharray="4 4" strokeOpacity={0.5} label={{ value: `${bestExpRate}%`, fontSize: 10, fill: "var(--chart-2)" }} />
+                <ReferenceDot x={bestEpoch} y={bestExpRate} r={5} fill="var(--chart-2)" stroke="var(--background)" strokeWidth={2} />
+                <ChartTooltip content={<ChartTooltipContent />} />
+              </AreaChart>
+            </ChartContainer>
+          </CardContent>
+        </Card>
       )}
 
       {/* LR Schedule */}
@@ -1113,7 +996,7 @@ function TrainingTab() {
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold font-mono text-emerald-500">{bestExpRate}%</p>
-            <p className="text-xs text-muted-foreground mt-1">Best ExpRate (avg)</p>
+            <p className="text-xs text-muted-foreground mt-1">Best ExpRate</p>
             <p className="text-[10px] text-muted-foreground">Epoch {bestEpoch}</p>
           </CardContent>
         </Card>
@@ -1121,7 +1004,7 @@ function TrainingTab() {
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold font-mono">{lastEpoch?.lr?.toExponential(2)}</p>
             <p className="text-xs text-muted-foreground mt-1">Final LR</p>
-            <p className="text-[10px] text-muted-foreground">{lrEvents.length - 1} decay events</p>
+            <p className="text-[10px] text-muted-foreground">5 decay events</p>
           </CardContent>
         </Card>
       </div>
@@ -1151,7 +1034,7 @@ export function DashboardPage({ onNavigate, onNewConvert }: DashboardPageProps) 
           </div>
           <Badge variant="outline" className="text-xs w-fit">
             <Activity className="h-3 w-3 mr-1" />
-            {datasetStats.totalSamples.toLocaleString()} samples · 114 tokens · 6.39M params
+            {datasetStats.totalSamples.toLocaleString()} samples · {datasetStats.tokenFrequency.length} tokens · 6.39M params
           </Badge>
         </div>
 

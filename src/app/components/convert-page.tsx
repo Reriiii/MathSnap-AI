@@ -395,7 +395,7 @@ function ChatPanel() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: currentInput, history: messages }),
+        body: JSON.stringify({ message: currentInput }),
       });
       const data = await response.json();
       if (data.error) {
@@ -416,7 +416,7 @@ function ChatPanel() {
         <h3 className="font-medium text-sm">MathSnap Assistant</h3>
         <p className="text-[10px] text-muted-foreground">Powered by Llama 3.3 · Mini-CoMER</p>
       </div>
-      <ScrollArea className="flex-1 min-h-0 p-3">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3">
         {messages.map((m, i) => (
           <div key={i} className={`mb-2 flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`p-2.5 rounded-lg text-xs max-w-[85%] ${
@@ -434,7 +434,7 @@ function ChatPanel() {
           </div>
         )}
         <div ref={scrollRef} />
-      </ScrollArea>
+      </div>
       <div className="p-2.5 border-t">
         <div className="flex gap-1.5">
           <Input
@@ -475,8 +475,7 @@ export function ConvertPage() {
     try {
       const formData = new FormData();
       formData.append("file", item.file);
-      const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/predict`, { method: "POST", body: formData });
+      const response = await fetch("/api/predict", { method: "POST", body: formData });
       if (!response.ok) throw new Error("Backend not responding");
       const data = await response.json();
       setImages((prev) => prev.map((img) => img.id === item.id ? { ...img, latex: data.latex, status: "done" as const } : img));

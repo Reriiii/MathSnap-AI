@@ -1,1580 +1,881 @@
 {
-  "totalSamples": 27056,
+  "totalSamples": 12166,
   "splits": [
     {
       "name": "train",
-      "count": 21855,
-      "percentage": 80.8
+      "count": 8834,
+      "percentage": 72.6
     },
     {
       "name": "val",
-      "count": 1702,
-      "percentage": 6.3
-    },
-    {
-      "name": "test",
-      "count": 3499,
-      "percentage": 12.9
+      "count": 3332,
+      "percentage": 27.4
     }
   ],
   "tokenFrequency": [
     {
-      "token": "}",
-      "total": 49035,
-      "train": 41289,
-      "val": 2709,
-      "test": 5037,
-      "category": "Structural"
-    },
-    {
       "token": "{",
-      "total": 49033,
-      "train": 41287,
-      "val": 2709,
-      "test": 5037,
+      "total": 28276,
+      "train": 19976,
+      "val": 8300,
       "category": "Structural"
     },
     {
-      "token": "_",
-      "total": 18883,
-      "train": 15478,
-      "val": 1346,
-      "test": 2059,
+      "token": "}",
+      "total": 28276,
+      "train": 19976,
+      "val": 8300,
       "category": "Structural"
     },
     {
       "token": "1",
-      "total": 18084,
-      "train": 14053,
-      "val": 1336,
-      "test": 2695,
+      "total": 8743,
+      "train": 6207,
+      "val": 2536,
       "category": "Digits"
     },
     {
       "token": "2",
-      "total": 17554,
-      "train": 13435,
-      "val": 1350,
-      "test": 2769,
+      "total": 8743,
+      "train": 6190,
+      "val": 2553,
       "category": "Digits"
     },
     {
       "token": "^",
-      "total": 16968,
-      "train": 13023,
-      "val": 1247,
-      "test": 2698,
+      "total": 8498,
+      "train": 6099,
+      "val": 2399,
       "category": "Structural"
     },
     {
+      "token": "+",
+      "total": 7582,
+      "train": 5406,
+      "val": 2176,
+      "category": "Operators"
+    },
+    {
+      "token": "_",
+      "total": 7149,
+      "train": 4834,
+      "val": 2315,
+      "category": "Structural"
+    },
+    {
+      "token": "x",
+      "total": 7057,
+      "train": 5031,
+      "val": 2026,
+      "category": "Lowercase"
+    },
+    {
+      "token": "-",
+      "total": 6032,
+      "train": 4305,
+      "val": 1727,
+      "category": "Operators"
+    },
+    {
       "token": "(",
-      "total": 13815,
-      "train": 11267,
-      "val": 832,
-      "test": 1716,
+      "total": 5561,
+      "train": 3939,
+      "val": 1622,
       "category": "Delimiters"
     },
     {
       "token": ")",
-      "total": 13814,
-      "train": 11267,
-      "val": 831,
-      "test": 1716,
+      "total": 5560,
+      "train": 3939,
+      "val": 1621,
       "category": "Delimiters"
     },
     {
-      "token": "+",
-      "total": 13449,
-      "train": 10214,
-      "val": 1098,
-      "test": 2137,
-      "category": "Operators"
-    },
-    {
-      "token": "x",
-      "total": 13305,
-      "train": 10261,
-      "val": 991,
-      "test": 2053,
-      "category": "Lowercase"
-    },
-    {
       "token": "=",
-      "total": 12333,
-      "train": 9938,
-      "val": 768,
-      "test": 1627,
-      "category": "Operators"
-    },
-    {
-      "token": "-",
-      "total": 11603,
-      "train": 8897,
-      "val": 891,
-      "test": 1815,
+      "total": 5109,
+      "train": 3612,
+      "val": 1497,
       "category": "Operators"
     },
     {
       "token": "\\frac",
-      "total": 8724,
-      "train": 6576,
-      "val": 755,
-      "test": 1393,
+      "total": 5068,
+      "train": 3626,
+      "val": 1442,
       "category": "Structural"
     },
     {
-      "token": "n",
-      "total": 6881,
-      "train": 5474,
-      "val": 442,
-      "test": 965,
+      "token": "a",
+      "total": 3454,
+      "train": 2473,
+      "val": 981,
       "category": "Lowercase"
     },
     {
-      "token": "a",
-      "total": 6426,
-      "train": 5034,
-      "val": 479,
-      "test": 913,
+      "token": "3",
+      "total": 3452,
+      "train": 2455,
+      "val": 997,
+      "category": "Digits"
+    },
+    {
+      "token": "n",
+      "total": 3139,
+      "train": 2238,
+      "val": 901,
       "category": "Lowercase"
     },
     {
       "token": "0",
-      "total": 6179,
-      "train": 4995,
-      "val": 393,
-      "test": 791,
-      "category": "Digits"
-    },
-    {
-      "token": "3",
-      "total": 6174,
-      "train": 4652,
-      "val": 521,
-      "test": 1001,
+      "total": 2525,
+      "train": 1790,
+      "val": 735,
       "category": "Digits"
     },
     {
       "token": "y",
-      "total": 4558,
-      "train": 3520,
-      "val": 351,
-      "test": 687,
+      "total": 2493,
+      "train": 1765,
+      "val": 728,
       "category": "Lowercase"
-    },
-    {
-      "token": ",",
-      "total": 4543,
-      "train": 4073,
-      "val": 161,
-      "test": 309,
-      "category": "Symbols"
-    },
-    {
-      "token": "b",
-      "total": 3992,
-      "train": 3050,
-      "val": 309,
-      "test": 633,
-      "category": "Lowercase"
-    },
-    {
-      "token": "4",
-      "total": 3900,
-      "train": 2895,
-      "val": 351,
-      "test": 654,
-      "category": "Digits"
     },
     {
       "token": "\\sqrt",
-      "total": 3743,
-      "train": 2796,
-      "val": 339,
-      "test": 608,
+      "total": 2493,
+      "train": 1791,
+      "val": 702,
       "category": "Structural"
     },
     {
-      "token": "i",
-      "total": 3634,
-      "train": 3025,
-      "val": 203,
-      "test": 406,
-      "category": "Lowercase"
+      "token": "4",
+      "total": 2290,
+      "train": 1635,
+      "val": 655,
+      "category": "Digits"
     },
     {
-      "token": "d",
-      "total": 3360,
-      "train": 2677,
-      "val": 225,
-      "test": 458,
-      "category": "Lowercase"
-    },
-    {
-      "token": "t",
-      "total": 2804,
-      "train": 2403,
-      "val": 142,
-      "test": 259,
-      "category": "Lowercase"
-    },
-    {
-      "token": "c",
-      "total": 2703,
-      "train": 2160,
-      "val": 179,
-      "test": 364,
+      "token": "b",
+      "total": 2236,
+      "train": 1598,
+      "val": 638,
       "category": "Lowercase"
     },
     {
       "token": "z",
-      "total": 2677,
-      "train": 2059,
-      "val": 206,
-      "test": 412,
+      "total": 1500,
+      "train": 1074,
+      "val": 426,
       "category": "Lowercase"
     },
     {
-      "token": "k",
-      "total": 2563,
-      "train": 2148,
-      "val": 125,
-      "test": 290,
+      "token": "d",
+      "total": 1495,
+      "train": 1063,
+      "val": 432,
       "category": "Lowercase"
     },
     {
       "token": "5",
-      "total": 2513,
-      "train": 1881,
-      "val": 214,
-      "test": 418,
+      "total": 1420,
+      "train": 1003,
+      "val": 417,
       "category": "Digits"
     },
     {
-      "token": "f",
-      "total": 2268,
-      "train": 1856,
-      "val": 141,
-      "test": 271,
+      "token": "\\limits",
+      "total": 1363,
+      "train": 1046,
+      "val": 317,
+      "category": "Structural"
+    },
+    {
+      "token": "i",
+      "total": 1344,
+      "train": 958,
+      "val": 386,
       "category": "Lowercase"
     },
     {
-      "token": "p",
-      "total": 2186,
-      "train": 1825,
-      "val": 122,
-      "test": 239,
+      "token": "c",
+      "total": 1296,
+      "train": 941,
+      "val": 355,
       "category": "Lowercase"
     },
     {
       "token": "6",
-      "total": 1989,
-      "train": 1452,
-      "val": 179,
-      "test": 358,
+      "total": 1115,
+      "train": 795,
+      "val": 320,
       "category": "Digits"
     },
     {
-      "token": "r",
-      "total": 1926,
-      "train": 1645,
-      "val": 105,
-      "test": 176,
-      "category": "Lowercase"
-    },
-    {
-      "token": "m",
-      "total": 1882,
-      "train": 1600,
-      "val": 95,
-      "test": 187,
-      "category": "Lowercase"
-    },
-    {
-      "token": "\\mbox",
-      "total": 1877,
-      "train": 1847,
-      "val": 15,
-      "test": 15,
-      "category": "Symbols"
+      "token": "\\sin",
+      "total": 1081,
+      "train": 783,
+      "val": 298,
+      "category": "Functions"
     },
     {
       "token": "7",
-      "total": 1795,
-      "train": 1307,
-      "val": 154,
-      "test": 334,
-      "category": "Digits"
-    },
-    {
-      "token": "e",
-      "total": 1692,
-      "train": 1370,
-      "val": 99,
-      "test": 223,
-      "category": "Lowercase"
-    },
-    {
-      "token": "8",
-      "total": 1686,
-      "train": 1217,
-      "val": 154,
-      "test": 315,
+      "total": 1056,
+      "train": 749,
+      "val": 307,
       "category": "Digits"
     },
     {
       "token": "9",
-      "total": 1632,
-      "train": 1181,
-      "val": 144,
-      "test": 307,
+      "total": 1032,
+      "train": 728,
+      "val": 304,
       "category": "Digits"
     },
     {
-      "token": "|",
-      "total": 1626,
-      "train": 1320,
-      "val": 124,
-      "test": 182,
-      "category": "Delimiters"
+      "token": "8",
+      "total": 1022,
+      "train": 728,
+      "val": 294,
+      "category": "Digits"
     },
     {
-      "token": "\\sin",
-      "total": 1612,
-      "train": 1255,
-      "val": 143,
-      "test": 214,
-      "category": "Functions"
+      "token": "t",
+      "total": 959,
+      "train": 690,
+      "val": 269,
+      "category": "Lowercase"
     },
     {
-      "token": "\\theta",
-      "total": 1445,
-      "train": 1107,
-      "val": 133,
-      "test": 205,
-      "category": "Greek"
+      "token": "f",
+      "total": 942,
+      "train": 676,
+      "val": 266,
+      "category": "Lowercase"
+    },
+    {
+      "token": ",",
+      "total": 893,
+      "train": 617,
+      "val": 276,
+      "category": "Symbols"
+    },
+    {
+      "token": "k",
+      "total": 879,
+      "train": 619,
+      "val": 260,
+      "category": "Lowercase"
     },
     {
       "token": "\\sum",
-      "total": 1444,
-      "train": 1122,
-      "val": 112,
-      "test": 210,
+      "total": 858,
+      "train": 625,
+      "val": 233,
       "category": "Symbols"
     },
     {
       "token": "\\times",
-      "total": 1412,
-      "train": 1064,
-      "val": 120,
-      "test": 228,
+      "total": 836,
+      "train": 596,
+      "val": 240,
       "category": "Operators"
     },
     {
-      "token": "\\alpha",
-      "total": 1372,
-      "train": 1077,
-      "val": 79,
-      "test": 216,
-      "category": "Greek"
-    },
-    {
-      "token": "A",
-      "total": 1358,
-      "train": 1186,
-      "val": 65,
-      "test": 107,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\pi",
-      "total": 1355,
-      "train": 1038,
-      "val": 115,
-      "test": 202,
-      "category": "Greek"
-    },
-    {
-      "token": "/",
-      "total": 1303,
-      "train": 1174,
-      "val": 43,
-      "test": 86,
-      "category": "Other"
-    },
-    {
-      "token": "\\cos",
-      "total": 1293,
-      "train": 983,
-      "val": 104,
-      "test": 206,
-      "category": "Functions"
-    },
-    {
-      "token": "v",
-      "total": 1219,
-      "train": 1062,
-      "val": 61,
-      "test": 96,
-      "category": "Lowercase"
-    },
-    {
       "token": "\\int",
-      "total": 1209,
-      "train": 916,
-      "val": 109,
-      "test": 184,
+      "total": 833,
+      "train": 605,
+      "val": 228,
       "category": "Symbols"
     },
     {
-      "token": "s",
-      "total": 1153,
-      "train": 1035,
-      "val": 47,
-      "test": 71,
+      "token": "\\cos",
+      "total": 808,
+      "train": 575,
+      "val": 233,
+      "category": "Functions"
+    },
+    {
+      "token": "p",
+      "total": 792,
+      "train": 565,
+      "val": 227,
       "category": "Lowercase"
     },
     {
-      "token": "j",
-      "total": 1145,
-      "train": 929,
-      "val": 64,
-      "test": 152,
+      "token": "\\theta",
+      "total": 767,
+      "train": 544,
+      "val": 223,
+      "category": "Greek"
+    },
+    {
+      "token": "\\pi",
+      "total": 710,
+      "train": 498,
+      "val": 212,
+      "category": "Greek"
+    },
+    {
+      "token": "r",
+      "total": 667,
+      "train": 487,
+      "val": 180,
       "category": "Lowercase"
     },
     {
-      "token": "u",
-      "total": 1133,
-      "train": 971,
-      "val": 62,
-      "test": 100,
+      "token": "m",
+      "total": 667,
+      "train": 476,
+      "val": 191,
       "category": "Lowercase"
     },
     {
-      "token": "\\left",
-      "total": 1127,
-      "train": 942,
-      "val": 66,
-      "test": 119,
+      "token": "e",
+      "total": 660,
+      "train": 463,
+      "val": 197,
+      "category": "Lowercase"
+    },
+    {
+      "token": "|",
+      "total": 636,
+      "train": 448,
+      "val": 188,
       "category": "Delimiters"
     },
     {
-      "token": "\\right",
-      "total": 1127,
-      "train": 942,
-      "val": 66,
-      "test": 119,
-      "category": "Delimiters"
+      "token": "\\alpha",
+      "total": 547,
+      "train": 383,
+      "val": 164,
+      "category": "Greek"
+    },
+    {
+      "token": "\\infty",
+      "total": 534,
+      "train": 376,
+      "val": 158,
+      "category": "Symbols"
     },
     {
       "token": "[",
-      "total": 1092,
-      "train": 886,
-      "val": 78,
-      "test": 128,
+      "total": 489,
+      "train": 339,
+      "val": 150,
       "category": "Delimiters"
     },
     {
       "token": "]",
-      "total": 1091,
-      "train": 886,
-      "val": 78,
-      "test": 127,
+      "total": 488,
+      "train": 339,
+      "val": 149,
       "category": "Delimiters"
     },
     {
-      "token": "X",
-      "total": 1081,
-      "train": 901,
-      "val": 56,
-      "test": 124,
-      "category": "Uppercase"
+      "token": "u",
+      "total": 448,
+      "train": 321,
+      "val": 127,
+      "category": "Lowercase"
     },
     {
       "token": "q",
-      "total": 1080,
-      "train": 879,
-      "val": 71,
-      "test": 130,
+      "total": 439,
+      "train": 309,
+      "val": 130,
       "category": "Lowercase"
     },
     {
       "token": "g",
-      "total": 1073,
-      "train": 890,
-      "val": 63,
-      "test": 120,
+      "total": 436,
+      "train": 316,
+      "val": 120,
       "category": "Lowercase"
     },
     {
-      "token": "C",
-      "total": 1031,
-      "train": 876,
-      "val": 51,
-      "test": 104,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\infty",
-      "total": 1016,
-      "train": 777,
-      "val": 76,
-      "test": 163,
+      "token": "\\rightarrow",
+      "total": 428,
+      "train": 298,
+      "val": 130,
       "category": "Symbols"
     },
     {
-      "token": ".",
-      "total": 981,
-      "train": 753,
-      "val": 77,
-      "test": 151,
-      "category": "Symbols"
-    },
-    {
-      "token": "B",
-      "total": 950,
-      "train": 809,
-      "val": 58,
-      "test": 83,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\ldots",
-      "total": 929,
-      "train": 784,
-      "val": 45,
-      "test": 100,
-      "category": "Symbols"
-    },
-    {
-      "token": "T",
-      "total": 916,
-      "train": 845,
-      "val": 25,
-      "test": 46,
-      "category": "Uppercase"
-    },
-    {
-      "token": "h",
-      "total": 891,
-      "train": 728,
-      "val": 53,
-      "test": 110,
+      "token": "j",
+      "total": 426,
+      "train": 301,
+      "val": 125,
       "category": "Lowercase"
     },
     {
       "token": "\\beta",
-      "total": 883,
-      "train": 695,
-      "val": 57,
-      "test": 131,
+      "total": 423,
+      "train": 295,
+      "val": 128,
       "category": "Greek"
     },
     {
-      "token": "P",
-      "total": 862,
-      "train": 803,
-      "val": 24,
-      "test": 35,
+      "token": "\\log",
+      "total": 406,
+      "train": 297,
+      "val": 109,
+      "category": "Functions"
+    },
+    {
+      "token": "v",
+      "total": 404,
+      "train": 285,
+      "val": 119,
+      "category": "Lowercase"
+    },
+    {
+      "token": "\\tan",
+      "total": 401,
+      "train": 286,
+      "val": 115,
+      "category": "Functions"
+    },
+    {
+      "token": "\\lim",
+      "total": 399,
+      "train": 292,
+      "val": 107,
+      "category": "Functions"
+    },
+    {
+      "token": "A",
+      "total": 392,
+      "train": 277,
+      "val": 115,
       "category": "Uppercase"
     },
     {
-      "token": "N",
-      "total": 811,
-      "train": 727,
-      "val": 36,
-      "test": 48,
+      "token": "X",
+      "total": 384,
+      "train": 279,
+      "val": 105,
       "category": "Uppercase"
     },
     {
-      "token": "S",
-      "total": 808,
-      "train": 714,
-      "val": 38,
-      "test": 56,
+      "token": ".",
+      "total": 382,
+      "train": 258,
+      "val": 124,
+      "category": "Symbols"
+    },
+    {
+      "token": "C",
+      "total": 363,
+      "train": 258,
+      "val": 105,
       "category": "Uppercase"
     },
     {
-      "token": "E",
-      "total": 792,
-      "train": 701,
-      "val": 28,
-      "test": 63,
-      "category": "Uppercase"
+      "token": "h",
+      "total": 349,
+      "train": 270,
+      "val": 79,
+      "category": "Lowercase"
     },
     {
-      "token": "F",
-      "total": 782,
-      "train": 691,
-      "val": 38,
-      "test": 53,
+      "token": "B",
+      "total": 337,
+      "train": 239,
+      "val": 98,
       "category": "Uppercase"
     },
     {
       "token": "\\leq",
-      "total": 756,
-      "train": 609,
-      "val": 41,
-      "test": 106,
+      "total": 319,
+      "train": 221,
+      "val": 98,
       "category": "Operators"
     },
     {
+      "token": "s",
+      "total": 317,
+      "train": 234,
+      "val": 83,
+      "category": "Lowercase"
+    },
+    {
+      "token": "/",
+      "total": 273,
+      "train": 196,
+      "val": 77,
+      "category": "Other"
+    },
+    {
       "token": "R",
-      "total": 747,
-      "train": 620,
-      "val": 44,
-      "test": 83,
+      "total": 265,
+      "train": 187,
+      "val": 78,
       "category": "Uppercase"
+    },
+    {
+      "token": "F",
+      "total": 239,
+      "train": 168,
+      "val": 71,
+      "category": "Uppercase"
+    },
+    {
+      "token": "\\pm",
+      "total": 215,
+      "train": 153,
+      "val": 62,
+      "category": "Operators"
+    },
+    {
+      "token": "\\geq",
+      "total": 208,
+      "train": 147,
+      "val": 61,
+      "category": "Operators"
+    },
+    {
+      "token": "E",
+      "total": 204,
+      "train": 145,
+      "val": 59,
+      "category": "Uppercase"
+    },
+    {
+      "token": "\\div",
+      "total": 198,
+      "train": 151,
+      "val": 47,
+      "category": "Operators"
     },
     {
       "token": "L",
-      "total": 737,
-      "train": 642,
-      "val": 40,
-      "test": 55,
+      "total": 197,
+      "train": 136,
+      "val": 61,
       "category": "Uppercase"
     },
     {
-      "token": "V",
-      "total": 736,
-      "train": 660,
-      "val": 22,
-      "test": 54,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\log",
-      "total": 642,
-      "train": 488,
-      "val": 51,
-      "test": 103,
-      "category": "Functions"
-    },
-    {
-      "token": "\\rightarrow",
-      "total": 626,
-      "train": 430,
-      "val": 58,
-      "test": 138,
+      "token": "\\ldots",
+      "total": 194,
+      "train": 92,
+      "val": 102,
       "category": "Symbols"
     },
     {
-      "token": "M",
-      "total": 620,
-      "train": 554,
-      "val": 22,
-      "test": 44,
+      "token": "N",
+      "total": 193,
+      "train": 135,
+      "val": 58,
       "category": "Uppercase"
     },
     {
       "token": "w",
-      "total": 613,
-      "train": 527,
-      "val": 28,
-      "test": 58,
+      "total": 193,
+      "train": 139,
+      "val": 54,
       "category": "Lowercase"
+    },
+    {
+      "token": "S",
+      "total": 182,
+      "train": 117,
+      "val": 65,
+      "category": "Uppercase"
     },
     {
       "token": "l",
-      "total": 575,
-      "train": 492,
-      "val": 32,
-      "test": 51,
-      "category": "Lowercase"
-    },
-    {
-      "token": "\\lim",
-      "total": 570,
-      "train": 465,
-      "val": 37,
-      "test": 68,
-      "category": "Functions"
-    },
-    {
-      "token": "H",
-      "total": 552,
-      "train": 486,
-      "val": 25,
-      "test": 41,
-      "category": "Uppercase"
-    },
-    {
-      "token": "G",
-      "total": 547,
-      "train": 499,
-      "val": 20,
-      "test": 28,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\prime",
-      "total": 500,
-      "train": 441,
-      "val": 20,
-      "test": 39,
-      "category": "Structural"
-    },
-    {
-      "token": "\\tan",
-      "total": 482,
-      "train": 375,
-      "val": 46,
-      "test": 61,
-      "category": "Functions"
-    },
-    {
-      "token": "I",
-      "total": 478,
-      "train": 425,
-      "val": 16,
-      "test": 37,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\geq",
-      "total": 456,
-      "train": 353,
-      "val": 33,
-      "test": 70,
-      "category": "Operators"
-    },
-    {
-      "token": "\\pm",
-      "total": 442,
-      "train": 342,
-      "val": 30,
-      "test": 70,
-      "category": "Operators"
-    },
-    {
-      "token": "\\sigma",
-      "total": 441,
-      "train": 409,
-      "val": 15,
-      "test": 17,
-      "category": "Greek"
-    },
-    {
-      "token": "o",
-      "total": 439,
-      "train": 391,
-      "val": 24,
-      "test": 24,
+      "total": 175,
+      "train": 119,
+      "val": 56,
       "category": "Lowercase"
     },
     {
       "token": "Y",
-      "total": 436,
-      "train": 361,
-      "val": 24,
-      "test": 51,
+      "total": 163,
+      "train": 117,
+      "val": 46,
       "category": "Uppercase"
     },
     {
-      "token": "<",
-      "total": 426,
-      "train": 353,
-      "val": 20,
-      "test": 53,
-      "category": "Operators"
-    },
-    {
-      "token": "\\gamma",
-      "total": 412,
-      "train": 354,
-      "val": 21,
-      "test": 37,
-      "category": "Greek"
-    },
-    {
-      "token": "\\phi",
-      "total": 410,
-      "train": 352,
-      "val": 24,
-      "test": 34,
-      "category": "Greek"
-    },
-    {
-      "token": "\\Delta",
-      "total": 395,
-      "train": 363,
-      "val": 9,
-      "test": 23,
-      "category": "Greek"
-    },
-    {
-      "token": "\\mu",
-      "total": 360,
-      "train": 310,
-      "val": 7,
-      "test": 43,
-      "category": "Greek"
-    },
-    {
-      "token": "\\{",
-      "total": 359,
-      "train": 315,
-      "val": 16,
-      "test": 28,
-      "category": "Delimiters"
-    },
-    {
-      "token": "\\}",
-      "total": 359,
-      "train": 315,
-      "val": 16,
-      "test": 28,
-      "category": "Delimiters"
-    },
-    {
       "token": "\\neq",
-      "total": 298,
-      "train": 225,
-      "val": 23,
-      "test": 50,
+      "total": 159,
+      "train": 112,
+      "val": 47,
       "category": "Operators"
     },
     {
-      "token": "!",
-      "total": 259,
-      "train": 198,
-      "val": 18,
-      "test": 43,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\limits",
-      "total": 232,
-      "train": 226,
-      "val": 0,
-      "test": 6,
-      "category": "Structural"
-    },
-    {
-      "token": ">",
-      "total": 230,
-      "train": 191,
-      "val": 10,
-      "test": 29,
-      "category": "Operators"
-    },
-    {
-      "token": "\\div",
-      "total": 226,
-      "train": 194,
-      "val": 19,
-      "test": 13,
-      "category": "Operators"
-    },
-    {
-      "token": "\\Bigg",
-      "total": 168,
-      "train": 168,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\in",
-      "total": 163,
-      "train": 144,
-      "val": 7,
-      "test": 12,
-      "category": "Symbols"
+      "token": "P",
+      "total": 154,
+      "train": 106,
+      "val": 48,
+      "category": "Uppercase"
     },
     {
       "token": "\\cdots",
       "total": 154,
-      "train": 154,
-      "val": 0,
-      "test": 0,
+      "train": 148,
+      "val": 6,
       "category": "Symbols"
     },
     {
-      "token": "\\to",
+      "token": "<",
       "total": 154,
-      "train": 154,
-      "val": 0,
-      "test": 0,
+      "train": 106,
+      "val": 48,
+      "category": "Operators"
+    },
+    {
+      "token": "o",
+      "total": 152,
+      "train": 112,
+      "val": 40,
+      "category": "Lowercase"
+    },
+    {
+      "token": "V",
+      "total": 151,
+      "train": 106,
+      "val": 45,
+      "category": "Uppercase"
+    },
+    {
+      "token": "!",
+      "total": 149,
+      "train": 98,
+      "val": 51,
       "category": "Symbols"
     },
     {
       "token": "\\cdot",
       "total": 146,
-      "train": 146,
-      "val": 0,
-      "test": 0,
-      "category": "Operators"
-    },
-    {
-      "token": "\\lt",
-      "total": 136,
-      "train": 126,
+      "train": 145,
       "val": 1,
-      "test": 9,
       "category": "Operators"
     },
     {
-      "token": "\\mathrm",
-      "total": 81,
-      "train": 65,
-      "val": 5,
-      "test": 11,
-      "category": "Symbols"
+      "token": "H",
+      "total": 144,
+      "train": 100,
+      "val": 44,
+      "category": "Uppercase"
     },
     {
-      "token": "\\lambda",
-      "total": 75,
-      "train": 42,
-      "val": 7,
-      "test": 26,
+      "token": "T",
+      "total": 140,
+      "train": 97,
+      "val": 43,
+      "category": "Uppercase"
+    },
+    {
+      "token": "M",
+      "total": 138,
+      "train": 99,
+      "val": 39,
+      "category": "Uppercase"
+    },
+    {
+      "token": "\\gamma",
+      "total": 130,
+      "train": 90,
+      "val": 40,
       "category": "Greek"
     },
     {
-      "token": "\\gt",
-      "total": 72,
-      "train": 67,
-      "val": 2,
-      "test": 3,
+      "token": "G",
+      "total": 122,
+      "train": 88,
+      "val": 34,
+      "category": "Uppercase"
+    },
+    {
+      "token": "\\phi",
+      "total": 122,
+      "train": 83,
+      "val": 39,
+      "category": "Greek"
+    },
+    {
+      "token": "\\prime",
+      "total": 119,
+      "train": 82,
+      "val": 37,
+      "category": "Structural"
+    },
+    {
+      "token": "\\{",
+      "total": 98,
+      "train": 69,
+      "val": 29,
+      "category": "Delimiters"
+    },
+    {
+      "token": "\\}",
+      "total": 98,
+      "train": 69,
+      "val": 29,
+      "category": "Delimiters"
+    },
+    {
+      "token": "I",
+      "total": 96,
+      "train": 69,
+      "val": 27,
+      "category": "Uppercase"
+    },
+    {
+      "token": "\\sigma",
+      "total": 82,
+      "train": 52,
+      "val": 30,
+      "category": "Greek"
+    },
+    {
+      "token": ">",
+      "total": 81,
+      "train": 56,
+      "val": 25,
       "category": "Operators"
     },
     {
+      "token": "\\mu",
+      "total": 68,
+      "train": 46,
+      "val": 22,
+      "category": "Greek"
+    },
+    {
+      "token": "\\Delta",
+      "total": 51,
+      "train": 35,
+      "val": 16,
+      "category": "Greek"
+    },
+    {
+      "token": "\\lambda",
+      "total": 43,
+      "train": 27,
+      "val": 16,
+      "category": "Greek"
+    },
+    {
+      "token": "\\in",
+      "total": 24,
+      "train": 14,
+      "val": 10,
+      "category": "Symbols"
+    },
+    {
       "token": "\\forall",
-      "total": 50,
-      "train": 38,
-      "val": 5,
-      "test": 7,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\!",
-      "total": 44,
-      "train": 44,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\Big",
-      "total": 34,
-      "train": 34,
-      "val": 0,
-      "test": 0,
+      "total": 16,
+      "train": 8,
+      "val": 8,
       "category": "Symbols"
     },
     {
       "token": "\\exists",
-      "total": 23,
-      "train": 16,
-      "val": 2,
-      "test": 5,
-      "category": "Symbols"
-    },
-    {
-      "token": "$",
-      "total": 23,
-      "train": 23,
-      "val": 0,
-      "test": 0,
-      "category": "Other"
-    },
-    {
-      "token": "'",
-      "total": 20,
-      "train": 20,
-      "val": 0,
-      "test": 0,
-      "category": "Other"
-    },
-    {
-      "token": "\\",
-      "total": 19,
-      "train": 19,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\lbrack",
-      "total": 8,
-      "train": 8,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\rbrack",
-      "total": 8,
-      "train": 8,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\;",
-      "total": 7,
-      "train": 7,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "O",
-      "total": 7,
-      "train": 7,
-      "val": 0,
-      "test": 0,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\leqy",
-      "total": 5,
-      "train": 0,
-      "val": 1,
-      "test": 4,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\intd",
-      "total": 4,
-      "train": 0,
-      "val": 0,
-      "test": 4,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\rightarrowx",
-      "total": 3,
-      "train": 0,
-      "val": 1,
-      "test": 2,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\parallel",
-      "total": 2,
-      "train": 2,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\hbox",
-      "total": 2,
-      "train": 2,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\rightarrowy",
-      "total": 2,
-      "train": 0,
-      "val": 1,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\neqa",
-      "total": 2,
-      "train": 0,
-      "val": 0,
-      "test": 2,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\logx",
-      "total": 2,
-      "train": 0,
-      "val": 0,
-      "test": 2,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\pij",
-      "total": 2,
-      "train": 0,
-      "val": 0,
-      "test": 2,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\gtM",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\gtp",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\ltq",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\ltl",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\dots",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\ltN",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
+      "total": 11,
+      "train": 4,
+      "val": 7,
       "category": "Symbols"
     },
     {
       "token": "\\Pi",
       "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
+      "train": 0,
+      "val": 1,
       "category": "Greek"
-    },
-    {
-      "token": "W",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Uppercase"
-    },
-    {
-      "token": "\\vtop",
-      "total": 1,
-      "train": 1,
-      "val": 0,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\logq",
-      "total": 1,
-      "train": 0,
-      "val": 1,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\rightarrowa",
-      "total": 1,
-      "train": 0,
-      "val": 1,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\leqa",
-      "total": 1,
-      "train": 0,
-      "val": 1,
-      "test": 0,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\pmiy",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\timesX",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\siny",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\cosk",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\ldotsd",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\thetak",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\intC",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\inftyh",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\sinnv",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\sqrth",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\mub",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\intdz",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\geqa",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\inX",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\leqb",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\piE",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\logf",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\ldotsx",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\geqd",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\piB",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\intb",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\timesY",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\gty",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\sinxe",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\rightarrowz",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\timesd",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\leqx",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\rightarrowc",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\logz",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\intdA",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\piT",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\cosLt",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\sinx",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
-    },
-    {
-      "token": "\\sumf",
-      "total": 1,
-      "train": 0,
-      "val": 0,
-      "test": 1,
-      "category": "Symbols"
     }
   ],
   "sequenceLength": {
     "histogram": [
       {
         "bin": "1-5",
-        "train": 3848,
-        "val": 312,
-        "test": 619
+        "train": 2073,
+        "val": 609
       },
       {
         "bin": "6-10",
-        "train": 5834,
-        "val": 397,
-        "test": 866
+        "train": 1735,
+        "val": 643
       },
       {
         "bin": "11-15",
-        "train": 4092,
-        "val": 323,
-        "test": 736
+        "train": 1264,
+        "val": 602
       },
       {
         "bin": "16-20",
-        "train": 2882,
-        "val": 240,
-        "test": 522
+        "train": 1068,
+        "val": 424
       },
       {
         "bin": "21-25",
-        "train": 2065,
-        "val": 160,
-        "test": 334
+        "train": 1112,
+        "val": 398
       },
       {
         "bin": "26-30",
-        "train": 1193,
-        "val": 105,
-        "test": 177
+        "train": 493,
+        "val": 229
       },
       {
         "bin": "31-40",
-        "train": 1244,
-        "val": 105,
-        "test": 150
+        "train": 700,
+        "val": 239
       },
       {
         "bin": "41-50",
-        "train": 435,
-        "val": 39,
-        "test": 65
+        "train": 242,
+        "val": 102
       },
       {
         "bin": "51-75",
-        "train": 237,
-        "val": 20,
-        "test": 30
+        "train": 124,
+        "val": 79
       },
       {
         "bin": "76-100",
-        "train": 24,
-        "val": 1,
-        "test": 0
+        "train": 23,
+        "val": 5
       },
       {
         "bin": "101-200",
         "train": 0,
-        "val": 0,
-        "test": 0
+        "val": 1
+      },
+      {
+        "bin": "201-300",
+        "train": 0,
+        "val": 1
       }
     ],
     "stats": [
       {
         "min": 1,
-        "max": 204,
-        "mean": 14.7,
-        "median": 12,
-        "p25": 7,
-        "p75": 20,
-        "p95": 36,
+        "max": 97,
+        "mean": 15.6,
+        "median": 13,
+        "p25": 6,
+        "p75": 23,
+        "p95": 38,
         "split": "train"
       },
       {
-        "min": 2,
-        "max": 78,
-        "mean": 15.3,
-        "median": 13,
+        "min": 1,
+        "max": 204,
+        "mean": 16.9,
+        "median": 14,
         "p25": 7,
-        "p75": 21,
-        "p95": 38,
+        "p75": 23,
+        "p95": 41,
         "split": "val"
       },
       {
         "min": 1,
-        "max": 73,
-        "mean": 14.4,
-        "median": 12,
-        "p25": 7,
-        "p75": 19,
-        "p95": 34,
-        "split": "test"
-      },
-      {
-        "min": 1,
         "max": 204,
-        "mean": 14.7,
-        "median": 12,
-        "p25": 7,
-        "p75": 20,
-        "p95": 36,
+        "mean": 16.0,
+        "median": 13,
+        "p25": 6,
+        "p75": 23,
+        "p95": 40,
         "split": "all"
       }
     ]
@@ -1583,7 +884,7 @@
     {
       "category": "Digits",
       "tokenCount": 10,
-      "totalFrequency": 61506,
+      "totalFrequency": 31398,
       "tokens": [
         "0",
         "1",
@@ -1600,7 +901,7 @@
     {
       "category": "Lowercase",
       "tokenCount": 26,
-      "totalFrequency": 72178,
+      "totalFrequency": 32919,
       "tokens": [
         "a",
         "b",
@@ -1632,8 +933,8 @@
     },
     {
       "category": "Uppercase",
-      "tokenCount": 20,
-      "totalFrequency": 14252,
+      "tokenCount": 18,
+      "totalFrequency": 3864,
       "tokens": [
         "A",
         "B",
@@ -1646,13 +947,11 @@
         "L",
         "M",
         "N",
-        "O",
         "P",
         "R",
         "S",
         "T",
         "V",
-        "W",
         "X",
         "Y"
       ]
@@ -1660,7 +959,7 @@
     {
       "category": "Greek",
       "tokenCount": 11,
-      "totalFrequency": 7149,
+      "totalFrequency": 2944,
       "tokens": [
         "\\Delta",
         "\\Pi",
@@ -1677,8 +976,8 @@
     },
     {
       "category": "Operators",
-      "tokenCount": 14,
-      "totalFrequency": 41985,
+      "tokenCount": 12,
+      "totalFrequency": 21039,
       "tokens": [
         "+",
         "-",
@@ -1688,9 +987,7 @@
         "\\cdot",
         "\\div",
         "\\geq",
-        "\\gt",
         "\\leq",
-        "\\lt",
         "\\neq",
         "\\pm",
         "\\times"
@@ -1699,7 +996,7 @@
     {
       "category": "Functions",
       "tokenCount": 5,
-      "totalFrequency": 4599,
+      "totalFrequency": 3095,
       "tokens": [
         "\\cos",
         "\\lim",
@@ -1711,7 +1008,7 @@
     {
       "category": "Structural",
       "tokenCount": 8,
-      "totalFrequency": 147118,
+      "totalFrequency": 81242,
       "tokens": [
         "\\frac",
         "\\limits",
@@ -1725,14 +1022,12 @@
     },
     {
       "category": "Delimiters",
-      "tokenCount": 9,
-      "totalFrequency": 34410,
+      "tokenCount": 7,
+      "totalFrequency": 12930,
       "tokens": [
         "(",
         ")",
         "[",
-        "\\left",
-        "\\right",
         "\\{",
         "\\}",
         "]",
@@ -1741,102 +1036,37 @@
     },
     {
       "category": "Symbols",
-      "tokenCount": 75,
-      "totalFrequency": 13865,
+      "tokenCount": 12,
+      "totalFrequency": 4476,
       "tokens": [
         "!",
         ",",
         ".",
-        "\\",
-        "\\!",
-        "\\;",
-        "\\Big",
-        "\\Bigg",
         "\\cdots",
-        "\\cosLt",
-        "\\cosk",
-        "\\dots",
         "\\exists",
         "\\forall",
-        "\\geqa",
-        "\\geqd",
-        "\\gtM",
-        "\\gtp",
-        "\\gty",
-        "\\hbox",
         "\\in",
-        "\\inX",
         "\\infty",
-        "\\inftyh",
         "\\int",
-        "\\intC",
-        "\\intb",
-        "\\intd",
-        "\\intdA",
-        "\\intdz",
-        "\\lbrack",
         "\\ldots",
-        "\\ldotsd",
-        "\\ldotsx",
-        "\\leqa",
-        "\\leqb",
-        "\\leqx",
-        "\\leqy",
-        "\\logf",
-        "\\logq",
-        "\\logx",
-        "\\logz",
-        "\\ltN",
-        "\\ltl",
-        "\\ltq",
-        "\\mathrm",
-        "\\mbox",
-        "\\mub",
-        "\\neqa",
-        "\\parallel",
-        "\\piB",
-        "\\piE",
-        "\\piT",
-        "\\pij",
-        "\\pmiy",
-        "\\rbrack",
         "\\rightarrow",
-        "\\rightarrowa",
-        "\\rightarrowc",
-        "\\rightarrowx",
-        "\\rightarrowy",
-        "\\rightarrowz",
-        "\\sinnv",
-        "\\sinx",
-        "\\sinxe",
-        "\\siny",
-        "\\sqrth",
-        "\\sum",
-        "\\sumf",
-        "\\thetak",
-        "\\timesX",
-        "\\timesY",
-        "\\timesd",
-        "\\to",
-        "\\vtop"
+        "\\sum"
       ]
     },
     {
       "category": "Other",
-      "tokenCount": 3,
-      "totalFrequency": 1346,
+      "tokenCount": 1,
+      "totalFrequency": 273,
       "tokens": [
-        "$",
-        "'",
         "/"
       ]
     }
   ],
   "datasetSources": [
     {
-      "source": "CROHME 2013",
-      "count": 1045,
-      "split": "train"
+      "source": "CROHME 2014",
+      "count": 986,
+      "split": "val"
     },
     {
       "source": "CROHME 2016",
@@ -1845,64 +1075,49 @@
     },
     {
       "source": "CROHME 2019",
-      "count": 10979,
-      "split": "train"
-    },
-    {
-      "source": "CROHME 2019",
       "count": 1199,
-      "split": "test"
-    },
-    {
-      "source": "CROHME 2023",
-      "count": 555,
       "split": "val"
     },
     {
-      "source": "CROHME 2023",
-      "count": 2300,
-      "split": "test"
-    },
-    {
-      "source": "Unknown",
-      "count": 9831,
+      "source": "CROHME Train",
+      "count": 8834,
       "split": "train"
     }
   ],
   "complexityMetrics": {
     "avgUniqueTokens": 8.6,
-    "avgNestingDepth": 0.87,
-    "maxNestingDepth": 9,
+    "avgNestingDepth": 0.95,
+    "maxNestingDepth": 5,
     "constructUsage": [
       {
         "construct": "\\frac",
-        "count": 6212,
-        "percentage": 23.0
+        "count": 3428,
+        "percentage": 28.2
       },
       {
         "construct": "\\sqrt",
-        "count": 2821,
-        "percentage": 10.4
+        "count": 1770,
+        "percentage": 14.5
       },
       {
         "construct": "\\sum",
-        "count": 1273,
-        "percentage": 4.7
+        "count": 734,
+        "percentage": 6.0
       },
       {
         "construct": "\\int",
-        "count": 1085,
-        "percentage": 4.0
+        "count": 742,
+        "percentage": 6.1
       },
       {
         "construct": "\\lim",
-        "count": 562,
-        "percentage": 2.1
+        "count": 393,
+        "percentage": 3.2
       },
       {
         "construct": "\\log",
-        "count": 469,
-        "percentage": 1.7
+        "count": 270,
+        "percentage": 2.2
       }
     ]
   }

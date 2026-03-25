@@ -161,36 +161,50 @@ Current self-attention maps (accumulated)    ─┤
 
 ## Dataset
 
-The model is trained and evaluated on the **CROHME** (Competition on Recognition of Online Handwritten Mathematical Expressions) dataset, combining samples from CROHME 2013, 2016, and 2019 competitions.
+The model is trained and evaluated on the **CROHME** (Competition on Recognition of Online Handwritten Mathematical Expressions) dataset, sourced directly from the [CoMER GitHub repository](https://github.com/Green-Wood/CoMER). Images are provided in BMP format with tab-separated caption files.
 
-| Split | Samples | Percentage |
-|-------|---------|------------|
-| Train | 21,855 | 80.7% |
-| Validation | 1,702 | 6.3% |
-| Test | 3,499 | 12.9% |
-| **Total** | **27,056** | **100%** |
+| Split | Samples | Role |
+|-------|---------|------|
+| Train (2013 + 2014 + 2016) | 8,834 | Training |
+| CROHME 2014 | 986 | Test |
+| CROHME 2016 | 1,147 | Test |
+| CROHME 2019 | 1,199 | Test |
+| **Total** | **12,166** | |
 
 **Vocabulary**: 114 tokens (110 LaTeX tokens + 4 special tokens: `<PAD>`, `<SOS>`, `<EOS>`, `<UNK>`)
 
 **Token Categories**:
-- Digits (0-9), Lowercase/Uppercase Latin letters
+- Digits (0–9), Latin letters (a–z, A–Z)
 - Greek letters (alpha, beta, gamma, delta, theta, pi, sigma, ...)
 - Operators (+, -, =, <, >, times, div, leq, geq, ...)
 - Functions (sin, cos, tan, log, lim, ...)
-- Structural tokens (frac, sqrt, ^, _, {, }, ...)
-- Delimiters, Symbols (infty, in, rightarrow, sum, int, prod, ...)
+- Structural tokens (frac, sqrt, ^, \_, {, }, ...)
+- Symbols (infty, in, rightarrow, sum, int, prod, ...)
 
-**Sequence Length Statistics**:
-- Mean: ~12 tokens | Median: ~10 tokens
-- 95th percentile: ~30 tokens
-- Maximum: ~200 tokens
+**Sequence Length Statistics** (across all splits):
+
+| Split | Min | Max | Mean | Std |
+|-------|-----|-----|------|-----|
+| Train | 1 | 97 | 15.6 | 12.4 |
+| CROHME 2014 | 1 | 204 | 16.2 | 13.8 |
+| CROHME 2016 | 2 | 113 | 17.8 | 13.8 |
+| CROHME 2019 | 2 | 90 | 16.7 | 12.1 |
+
+**Image Size Statistics** (original, before preprocessing):
+
+| Split | Width min/max/mean | Height min/max/mean |
+|-------|--------------------|---------------------|
+| Train | 26 / 2116 / 314 px | 54 / 481 / 104 px |
+| CROHME 2014 | 46 / 1734 / 304 px | 54 / 311 / 105 px |
+| CROHME 2016 | 56 / 1399 / 310 px | 54 / 297 / 102 px |
+| CROHME 2019 | 54 / 1480 / 339 px | 55 / 443 / 106 px |
 
 **Preprocessing Pipeline**:
-1. Convert to grayscale
-2. Otsu binarization
-3. Background detection (border pixel analysis) and invert if white background
-4. Aspect-ratio-preserving resize to fit within 128x512 pixels
-5. Normalize to [0, 1] float tensor
+1. Load as grayscale (1 channel)
+2. ScaleAugmentation ×[0.7, 1.4] (train only)
+3. ScaleToLimitRange: clamp to H ∈ [16, 128], W ∈ [16, 512]
+4. Normalize to [0, 1] float tensor
+5. SizeGroupedBatchSampler: group similar-sized images, max 4M pixels/batch
 
 ---
 
@@ -227,24 +241,30 @@ Training was conducted on a single **NVIDIA RTX 5060 Ti (16 GB VRAM)** with the 
 
 ### Expression Recognition Rate (ExpRate)
 
-| Model | Params | CROHME Test ExpRate |
-|-------|--------|---------------------|
-| CoMER (Zhao et al., 2022) | ~20M+ | 59.33% |
-| **Mini-CoMER (Ours)** | **6.39M** | **47.12%** |
+Mini-CoMER is evaluated on three standard CROHME test sets. ExpRate measures exact sequence match; ≤1/2/3 count expressions with at most 1/2/3 token errors.
 
-- **Best epoch**: 194 / 300
-- **Best validation ExpRate**: 47.12%
+| Dataset | ExpRate | ≤1 | ≤2 | ≤3 |
+|---------|---------|-----|-----|-----|
+| CROHME 2014 | 47.46% | 62.58% | 70.89% | 78.30% |
+| CROHME 2016 | 46.12% | 63.30% | 71.93% | 75.76% |
+| CROHME 2019 | 47.87% | 64.47% | 72.81% | 78.73% |
+
+### Comparison with Original CoMER
+
+| Model | Params | CROHME 2014 | CROHME 2016 | CROHME 2019 |
+|-------|--------|-------------|-------------|-------------|
+| CoMER (Zhao et al., 2022) | ~20M | 59.33% | 59.81% | 62.97% |
+| **Mini-CoMER (Ours)** | **6.39M** | **47.46%** | **46.12%** | **47.87%** |
+
+Mini-CoMER achieves a **68% parameter reduction** while retaining the core ARM coverage mechanism.
 
 ### Analysis
 
-The 12-point gap relative to the original CoMER is attributable to:
+The ~12-point gap relative to the original CoMER is attributable to:
 
-1. **Reduced decoder depth** (3 layers vs. 6): fewer layers of attention refinement limit the model's ability to resolve complex structural dependencies.
-2. **Incomplete training** (230/300 epochs): training was terminated before full convergence due to diminishing returns.
-3. **Single-GPU constraints**: smaller effective batch size compared to the original multi-GPU distributed training setup.
-4. **No auxiliary losses**: the original CoMER benefits from ICAL's auxiliary losses (SCCM, FusionModule); this implementation uses only standard cross-entropy.
-
-Despite the lower accuracy, Mini-CoMER achieves a **68% parameter reduction** while retaining the core architectural innovations (ARM coverage mechanism), demonstrating the feasibility of deploying attention-based HMER models in resource-constrained environments.
+1. **Reduced decoder depth** (3 layers vs. 6): fewer attention refinement layers limit the model's ability to resolve complex structural dependencies.
+2. **Single-GPU constraints**: smaller effective batch size compared to the original multi-GPU distributed training setup.
+3. **No auxiliary losses**: the original CoMER benefits from ICAL's auxiliary losses (SCCM, FusionModule); this implementation uses only standard cross-entropy.
 
 ---
 
